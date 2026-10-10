@@ -263,9 +263,10 @@ Contrato T9 publicado antes de delegar. El orquestador es propietario de `src/do
 - `GitOperation::RefreshRepositoryStatus(PathBuf)` solicita una lectura local de estado.
 - `GitResult::RepositoryStatusRefreshed { path, status }` devuelve `RepositoryStatus` para esa ruta.
 - `AppSnapshot` añade `status_refreshing: bool` y `status_checked_at: Option<SystemTime>` para el indicador de la UI.
+- `AppSnapshot` también añade `github_auth_checking: bool` para distinguir una consulta de sesión en curso de un estado todavía desconocido.
 - `RefreshRepositoryStatus` ejecuta `git status --porcelain=v2 --branch -z --untracked-files=all` con `--no-optional-locks`; además actualiza `last_fetch_at` e integración detectada usando los mecanismos existentes. No hace fetch, no actualiza referencias remotas ni altera el repositorio.
 - La app programa la consulta cada 2 segundos cuando hay un repo abierto y el worker está libre. La solicitud de fondo no activa `busy` ni se agrega al transcript de comandos. Las respuestas solo se aplican al repositorio activo que coincide con la ruta devuelta.
-- Al abrir Gitzi se solicita automáticamente `gh auth status`; la ausencia de GitHub CLI y la falta de sesión son estados visibles y no bloquean las funciones Git locales.
+- Al abrir Gitzi se solicita automáticamente `gh auth status` en una ruta de ejecución independiente del worker serial Git. La consulta tiene espera acotada y no activa `busy`; iniciar o terminar una consulta de sesión no bloquea las funciones Git locales. La ausencia de GitHub CLI y la falta de sesión son estados visibles.
 
 ### Interfaz T9 (`src/ui/**`)
 
@@ -276,6 +277,6 @@ Contrato T9 publicado antes de delegar. El orquestador es propietario de `src/do
 
 ### Integración T9 (`src/app.rs`)
 
-- El estado inicial programa detección de Git y verificación de sesión GitHub. Un resultado de autenticación tardío no reemplaza un login más reciente en curso.
-- La lectura automática de estado mantiene una sola solicitud en vuelo, no bloquea acciones de usuario, descarta respuestas de rutas anteriores y repinta con temporizador de bajo costo, sin bucle continuo.
+- El estado inicial programa detección de Git y verificación de sesión GitHub. El snapshot expone `github_auth_checking`; un resultado de autenticación tardío no reemplaza un login o una comprobación más reciente.
+- La lectura automática de estado mantiene una sola solicitud en vuelo, continúa durante el login web si el worker Git está libre, no bloquea acciones de usuario, descarta respuestas de rutas anteriores y repinta con temporizador de bajo costo, sin bucle continuo.
 - Abrir, refrescar y mutar conservan el flujo de inspección/listas ya existente; el polling solo reemplaza el estado del repositorio activo.
