@@ -32,8 +32,7 @@ enum Confirmation {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 enum WorkspaceTab {
     #[default]
-    Changes,
-    Sync,
+    CodeControl,
     History,
     Branches,
     Integrate,
@@ -41,9 +40,8 @@ enum WorkspaceTab {
 }
 
 impl WorkspaceTab {
-    const ALL: [Self; 6] = [
-        Self::Changes,
-        Self::Sync,
+    const ALL: [Self; 5] = [
+        Self::CodeControl,
         Self::History,
         Self::Branches,
         Self::Integrate,
@@ -52,8 +50,7 @@ impl WorkspaceTab {
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Changes => "Cambios",
-            Self::Sync => "Sincronizar",
+            Self::CodeControl => "Control de código",
             Self::History => "Historial",
             Self::Branches => "Ramas",
             Self::Integrate => "Integrar",
@@ -64,6 +61,7 @@ impl WorkspaceTab {
 
 pub struct UiState {
     active_tab: WorkspaceTab,
+    terminal_visible: bool,
     repository_path: String,
     clone_source: String,
     clone_destination: String,
@@ -94,7 +92,8 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
-            active_tab: WorkspaceTab::Changes,
+            active_tab: WorkspaceTab::CodeControl,
+            terminal_visible: true,
             repository_path: String::new(),
             clone_source: String::new(),
             clone_destination: String::new(),
@@ -124,6 +123,12 @@ impl Default for UiState {
     }
 }
 
+impl UiState {
+    pub fn terminal_visible(&self) -> bool {
+        self.terminal_visible
+    }
+}
+
 pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) -> Option<UiAction> {
     if state.active_repository != snapshot.active_repo {
         state.active_repository = snapshot.active_repo.clone();
@@ -146,13 +151,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
 
     apply_theme(ui);
     ui.vertical(|ui| {
-        render_repository_header(ui, snapshot, can_act, &mut action);
-        ui.add_space(8.0);
+        render_repository_header(ui, state, snapshot, can_act, &mut action);
+        ui.add_space(3.0);
         ui.horizontal(|ui| {
-            let width = ((ui.available_width() - 40.0) / 6.0).max(90.0);
+            let width = ((ui.available_width() - 32.0) / 5.0).max(90.0);
             for tab in WorkspaceTab::ALL {
                 let response = ui.add_sized(
-                    [width, 40.0],
+                    [width, 36.0],
                     egui::Button::selectable(state.active_tab == tab, tab.label()),
                 );
                 if response.clicked() {
@@ -171,27 +176,33 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                 egui::Color32::from_rgb(145, 230, 190),
             );
         }
-        egui::ScrollArea::vertical()
-            .id_salt(("gitzi_tab_content", state.active_tab))
-            .auto_shrink([false, false])
-            .show(ui, |ui| match state.active_tab {
-                WorkspaceTab::Changes => {
-                    render_changes_tab(ui, state, snapshot, can_act, &mut action)
-                }
-                WorkspaceTab::Sync => render_sync_tab(ui, state, snapshot, can_act, &mut action),
-                WorkspaceTab::History => {
-                    render_history_tab(ui, state, snapshot, can_act, &mut action)
-                }
-                WorkspaceTab::Branches => {
-                    render_branches_tab(ui, state, snapshot, can_act, &mut action)
-                }
-                WorkspaceTab::Integrate => {
-                    render_integrate_tab(ui, state, snapshot, can_act, &mut action)
-                }
-                WorkspaceTab::Repository => {
-                    render_repository_tab(ui, state, snapshot, can_act, &mut action)
-                }
-            });
+        if state.active_tab == WorkspaceTab::CodeControl {
+            egui::ScrollArea::vertical()
+                .id_salt(("gitzi_tab_content", state.active_tab))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    render_code_control(ui, state, snapshot, can_act, &mut action);
+                });
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt(("gitzi_tab_content", state.active_tab))
+                .auto_shrink([false, false])
+                .show(ui, |ui| match state.active_tab {
+                    WorkspaceTab::CodeControl => unreachable!(),
+                    WorkspaceTab::History => {
+                        render_history_tab(ui, state, snapshot, can_act, &mut action)
+                    }
+                    WorkspaceTab::Branches => {
+                        render_branches_tab(ui, state, snapshot, can_act, &mut action)
+                    }
+                    WorkspaceTab::Integrate => {
+                        render_integrate_tab(ui, state, snapshot, can_act, &mut action)
+                    }
+                    WorkspaceTab::Repository => {
+                        render_repository_tab(ui, state, snapshot, can_act, &mut action)
+                    }
+                });
+        }
         render_confirmation(ui, state, snapshot, can_act, &mut action);
     });
     if matches!(
@@ -215,13 +226,18 @@ pub fn render_terminal(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSna
     egui::Frame::new()
         .fill(egui::Color32::from_rgb(13, 17, 23))
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(49, 61, 75)))
-        .inner_margin(egui::Margin::symmetric(12, 7))
+        .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Terminal de actividad").strong());
                 ui.label(
                     egui::RichText::new(format!("{} comandos", snapshot.command_log.len())).weak(),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Ocultar").clicked() {
+                        state.terminal_visible = false;
+                    }
+                });
             });
             ui.add_space(3.0);
             egui::ScrollArea::both()
@@ -534,16 +550,16 @@ fn apply_theme(ui: &mut egui::Ui) {
 
     let style = ui.style_mut();
     style.visuals = visuals;
-    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(12.0, 8.0);
-    style.spacing.interact_size = egui::vec2(40.0, 40.0);
+    style.spacing.item_spacing = egui::vec2(7.0, 4.0);
+    style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    style.spacing.interact_size = egui::vec2(36.0, 36.0);
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
     style
         .text_styles
-        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(13.5));
     style
         .text_styles
-        .insert(egui::TextStyle::Button, egui::FontId::proportional(13.5));
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
     style
         .text_styles
         .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
@@ -562,73 +578,72 @@ fn render_file_row(
     action: &mut Option<UiAction>,
 ) {
     let selected = state.selected_file.as_ref() == Some(&file.path);
-    egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::symmetric(9, 7))
-        .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let label_width = (ui.available_width() * 0.58).max(120.0);
-                let select = ui
-                    .add_sized(
-                        [label_width, 26.0],
-                        egui::Button::selectable(
-                            selected,
-                            egui::RichText::new(file.path.display().to_string()).strong(),
-                        )
-                        .truncate(),
-                    )
-                    .on_hover_text(file.path.display().to_string());
-                if select.clicked() {
-                    state.selected_file = Some(file.path.clone());
-                    state.selected_area = preferred_area(file);
-                    state.requested_diff = None;
-                    if action.is_none() {
-                        let area = state.selected_area;
-                        *action = Some(request_diff(state, snapshot, file.path.clone(), area));
-                    }
-                }
+    ui.horizontal(|ui| {
+        let summary = if file.unmerged {
+            "Conflicto".to_owned()
+        } else if file.index_status == '?' && file.worktree_status == '?' {
+            "Nuevo · sin seguimiento".to_owned()
+        } else {
+            format!(
+                "Índice: {} · Árbol: {}",
+                status_description(file.index_status),
+                status_description(file.worktree_status)
+            )
+        };
+        let status_width = 206.0;
+        let select_width = (ui.available_width() - status_width - 132.0).max(120.0);
+        let select = ui
+            .add_sized(
+                [select_width, 36.0],
+                egui::Button::selectable(
+                    selected,
+                    egui::RichText::new(file.path.display().to_string()).strong(),
+                )
+                .truncate(),
+            )
+            .on_hover_text(file.path.display().to_string());
+        if select.clicked() {
+            state.selected_file = Some(file.path.clone());
+            state.selected_area = preferred_area(file);
+            state.requested_diff = None;
+            if action.is_none() {
+                let area = state.selected_area;
+                *action = Some(request_diff(state, snapshot, file.path.clone(), area));
+            }
+        }
+        ui.add_sized(
+            [status_width, 36.0],
+            egui::Label::new(egui::RichText::new(&summary).weak()).truncate(),
+        )
+        .on_hover_text(&summary);
 
-                let index_state = file.index_status;
-                let worktree_state = file.worktree_status;
-                let summary = format!(
-                    "Índice {} · Árbol {}{}",
-                    status_description(index_state),
-                    status_description(worktree_state),
-                    if file.unmerged { " · Conflicto" } else { "" }
-                );
-                ui.label(egui::RichText::new(summary).weak());
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(can_act && has_unstaged(file), egui::Button::new("Preparar"))
-                    .clicked()
-                    && action.is_none()
-                {
-                    *action = Some(UiAction::StageFile(file.path.clone()));
-                }
-                if ui
-                    .add_enabled(
-                        can_act && has_staged(file) && has_head.is_some(),
-                        egui::Button::new("Deshacer preparación"),
-                    )
-                    .clicked()
-                    && action.is_none()
-                {
-                    *action = Some(UiAction::UnstageFile(file.path.clone()));
-                }
-                if ui
-                    .add_enabled(
-                        can_act && !file.unmerged && (has_staged(file) || has_unstaged(file)),
-                        egui::Button::new("Descartar…"),
-                    )
-                    .clicked()
-                    && action.is_none()
-                {
-                    state.confirmation = Some(Confirmation::DiscardFile(file.path.clone()));
-                }
-            });
-        });
+        let stage = ui
+            .add_enabled(can_act && has_unstaged(file), egui::Button::new("+"))
+            .on_hover_text("Preparar este archivo para el commit");
+        if stage.clicked() && action.is_none() {
+            *action = Some(UiAction::StageFile(file.path.clone()));
+        }
+        let unstage = ui
+            .add_enabled(
+                can_act && has_staged(file) && has_head.is_some(),
+                egui::Button::new("−"),
+            )
+            .on_hover_text("Quitar este archivo del área preparada");
+        if unstage.clicked() && action.is_none() {
+            *action = Some(UiAction::UnstageFile(file.path.clone()));
+        }
+        let discard = ui
+            .add_enabled(
+                can_act && !file.unmerged && (has_staged(file) || has_unstaged(file)),
+                egui::Button::new("×"),
+            )
+            .on_hover_text("Descartar los cambios de este archivo…");
+        if discard.clicked() && action.is_none() {
+            state.confirmation = Some(Confirmation::DiscardFile(file.path.clone()));
+        }
+    });
+    ui.separator();
 }
-
 fn status_description(status: char) -> &'static str {
     match status {
         '.' => "limpio",
@@ -645,21 +660,19 @@ fn status_description(status: char) -> &'static str {
 
 fn render_repository_header(
     ui: &mut egui::Ui,
+    state: &mut UiState,
     snapshot: &AppSnapshot,
     can_act: bool,
     action: &mut Option<UiAction>,
 ) {
     egui::Frame::new()
         .fill(ui.visuals().faint_bg_color)
-        .inner_margin(egui::Margin::symmetric(14, 9))
+        .inner_margin(egui::Margin::symmetric(10, 5))
         .corner_radius(egui::CornerRadius::same(8))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.heading(egui::RichText::new("Gitzi").strong().size(21.0));
-                if snapshot.busy {
-                    ui.spinner();
-                    ui.label("Trabajando…");
-                } else if !snapshot.git_checked {
+                ui.heading(egui::RichText::new("Gitzi").strong().size(20.0));
+                if !snapshot.git_checked {
                     ui.spinner();
                     ui.label("Detectando Git…");
                 } else if let Some(version) = &snapshot.git_version {
@@ -672,22 +685,61 @@ fn render_repository_header(
                 }
                 ui.separator();
                 if let Some(path) = &snapshot.active_repo {
-                    let repository_name = path
+                    let name = path
                         .file_name()
                         .and_then(|name| name.to_str())
                         .filter(|name| !name.is_empty())
                         .unwrap_or("Repositorio");
-                    ui.label(egui::RichText::new(repository_name).strong());
-                    ui.label(egui::RichText::new(path.display().to_string()).weak());
+                    ui.label(egui::RichText::new(name).strong());
+                    ui.add_sized(
+                        [160.0, 20.0],
+                        egui::Label::new(egui::RichText::new(path.display().to_string()).weak())
+                            .truncate(),
+                    )
+                    .on_hover_text(path.display().to_string());
                 } else {
                     ui.label(egui::RichText::new("Sin repositorio abierto").weak());
                 }
+                if snapshot.busy {
+                    ui.spinner();
+                    ui.label("Trabajando…");
+                }
+                let open = ui.add_enabled(can_act, egui::Button::new("Abrir repositorio"));
+                if open.clicked()
+                    && let Some(path) =
+                        choose_folder("Selecciona el repositorio", &state.repository_path)
+                {
+                    state.repository_path = path.display().to_string();
+                    *action = Some(UiAction::OpenRepository(path));
+                }
+                ui.menu_button("Recientes", |menu| {
+                    if snapshot.recent_repositories.is_empty() {
+                        menu.label(egui::RichText::new("No hay repositorios recientes.").weak());
+                    }
+                    for path in &snapshot.recent_repositories {
+                        let label = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| path.display().to_string());
+                        let response = menu.button(label).on_hover_text(path.display().to_string());
+                        if response.clicked() && can_act && action.is_none() {
+                            state.repository_path = path.display().to_string();
+                            *action = Some(UiAction::OpenRepository(path.clone()));
+                            menu.close();
+                        }
+                    }
+                });
                 let refresh = ui.add_enabled(
                     can_act && snapshot.active_repo.is_some(),
                     egui::Button::new("Actualizar"),
                 );
                 if refresh.clicked() && action.is_none() {
                     *action = Some(UiAction::Refresh);
+                }
+                if !state.terminal_visible && ui.button("Mostrar terminal").clicked() {
+                    state.terminal_visible = true;
                 }
             });
             ui.horizontal_wrapped(|ui| {
@@ -703,60 +755,38 @@ fn render_repository_header(
                     );
                     ui.separator();
                     let clean = repository.files.is_empty();
-                    let state_text = if clean { "Limpio" } else { "Con cambios" };
-                    let state_color = if clean {
+                    let label = if clean { "Limpio" } else { "Con cambios" };
+                    let color = if clean {
                         egui::Color32::from_rgb(117, 220, 173)
                     } else {
                         ui.visuals().warn_fg_color
                     };
-                    ui.label(egui::RichText::new(state_text).color(state_color).strong());
+                    ui.label(egui::RichText::new(label).strong().color(color));
                     ui.label(format!("{} archivos cambiados", repository.files.len()));
-                    ui.separator();
-                    if repository.upstream.is_some() {
-                        ui.label(format!("↑ {} · ↓ {}", repository.ahead, repository.behind));
-                        ui.label(egui::RichText::new("refs locales conocidas").weak());
-                    } else {
-                        ui.label(egui::RichText::new("Sin upstream").weak());
-                    }
                     if repository.has_head == Some(false) {
                         ui.label(
                             egui::RichText::new("Sin commits").color(ui.visuals().warn_fg_color),
                         );
                     }
-                } else if snapshot.active_repo.is_some() {
-                    ui.label(egui::RichText::new("Consultando estado del repositorio…").weak());
-                } else {
-                    ui.label(
-                        egui::RichText::new(
-                            "Abre o clona un repositorio desde la pestaña Repositorio.",
-                        )
-                        .weak(),
-                    );
-                }
-                ui.separator();
-                if snapshot.status_refreshing {
+                    if let Some(checked_at) = snapshot.status_checked_at {
+                        ui.label(egui::RichText::new("●").weak())
+                            .on_hover_text(format!(
+                                "Último intento de actualizar el estado: {}",
+                                format_known_time(checked_at)
+                            ));
+                    }
+                } else if snapshot.active_repo.is_some() && snapshot.busy {
                     ui.spinner();
-                    ui.label("Actualizando estado…");
-                } else if let Some(checked_at) = snapshot.status_checked_at {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Estado comprobado · {}",
-                            format_known_time(checked_at)
-                        ))
-                        .weak(),
-                    );
-                } else {
-                    ui.label(egui::RichText::new("Estado aún no comprobado").weak());
+                    ui.label("Consultando repositorio…");
                 }
             });
         });
 }
-
 fn render_message(ui: &mut egui::Ui, title: &str, message: &str, color: egui::Color32) {
     egui::Frame::new()
         .fill(color.gamma_multiply(0.10))
         .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.32)))
-        .inner_margin(egui::Margin::symmetric(12, 7))
+        .inner_margin(egui::Margin::symmetric(10, 5))
         .corner_radius(egui::CornerRadius::same(6))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -766,18 +796,18 @@ fn render_message(ui: &mut egui::Ui, title: &str, message: &str, color: egui::Co
         });
 }
 
-fn render_changes_tab(
+fn render_code_control(
     ui: &mut egui::Ui,
     state: &mut UiState,
     snapshot: &AppSnapshot,
     can_act: bool,
     action: &mut Option<UiAction>,
 ) {
-    let (Some(path), Some(repository)) = (&snapshot.active_repo, &snapshot.repository) else {
+    let (Some(_path), Some(repository)) = (&snapshot.active_repo, &snapshot.repository) else {
         empty_state(
             ui,
             "Abre un repositorio",
-            "Puedes elegir uno en Repositorio.",
+            "Elige una carpeta desde el encabezado para revisar cambios y sincronizar.",
         );
         return;
     };
@@ -788,43 +818,119 @@ fn render_changes_tab(
     {
         state.selected_file = repository.files.first().map(|file| file.path.clone());
     }
-    ui.heading("Cambios");
-    if repository.files.is_empty() {
-        empty_state(
-            ui,
-            "Árbol de trabajo limpio",
-            "No hay archivos modificados.",
-        );
-        return;
-    }
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Archivos").strong());
-        ui.label(egui::RichText::new(repository.files.len().to_string()).weak());
-        ui.label(egui::RichText::new("Índice · árbol de trabajo").weak());
+    let has_upstream = repository.upstream.is_some();
+    let has_current_local_branch = snapshot.branches.iter().any(|branch| {
+        branch.kind == BranchKind::Local && branch.current && branch.name == repository.branch
     });
-    egui::ScrollArea::vertical()
-        .id_salt("repository_files")
-        .max_height(240.0)
-        .show(ui, |ui| {
-            for file in &repository.files {
-                render_file_row(
-                    ui,
-                    state,
-                    snapshot,
-                    file,
-                    repository.has_head,
-                    can_act,
-                    action,
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            if has_upstream {
+                ui.label(egui::RichText::new(format!("{} commits por subir", repository.ahead)).strong());
+                ui.separator();
+                ui.label(egui::RichText::new(format!("{} commits por bajar", repository.behind)).strong());
+                ui.label(egui::RichText::new("frente a refs locales conocidas; puede cambiar tras Fetch").weak());
+            } else {
+                ui.label(egui::RichText::new("Sin upstream").strong().color(ui.visuals().warn_fg_color));
+                ui.label(egui::RichText::new("Publica esta rama o configura un upstream en más opciones.").weak());
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            let fetch = ui.add_enabled(can_act && !snapshot.remotes.is_empty(), egui::Button::new("Fetch"));
+            if fetch.clicked() && action.is_none() { *action = Some(UiAction::Fetch); }
+            let pull_label = if has_upstream {
+                format!("Bajar {} commits", repository.behind)
+            } else { "Bajar cambios".to_owned() };
+            let pull = ui.add_enabled(can_act && has_upstream && has_current_local_branch, egui::Button::new(pull_label))
+                .on_hover_text("Pull: integra los commits del upstream según la política seleccionada");
+            if pull.clicked() && action.is_none() { *action = Some(UiAction::Pull); }
+            let push_label = if has_upstream {
+                format!("Subir {} commits", repository.ahead)
+            } else { "Subir cambios".to_owned() };
+            let push = ui.add_enabled(can_act && has_upstream && has_current_local_branch, egui::Button::new(push_label))
+                .on_hover_text("Push: publica los commits locales en el upstream");
+            if push.clicked() && action.is_none() { *action = Some(UiAction::Push); }
+            if !has_upstream && !snapshot.remotes.is_empty() {
+                let remotes: Vec<String> = snapshot.remotes.iter().map(|remote| remote.name.clone()).collect();
+                if !remotes.iter().any(|name| name == &state.selected_remote) { state.selected_remote.clone_from(&remotes[0]); }
+                egui::ComboBox::from_id_salt("publish_remote").selected_text(&state.selected_remote).show_ui(ui, |ui| {
+                    for remote in &remotes { ui.selectable_value(&mut state.selected_remote, remote.clone(), remote); }
+                });
+                let publish = ui.add_enabled(can_act && action.is_none() && !has_upstream && has_current_local_branch && repository.has_head == Some(true), egui::Button::new("Publicar rama y configurar upstream"));
+                if publish.clicked() && action.is_none() { *action = Some(UiAction::PublishBranch(state.selected_remote.clone())); }
+            } else if !has_upstream {
+                ui.label(
+                    egui::RichText::new("Añade un remoto para poder usar Fetch o publicar.")
+                        .weak(),
                 );
             }
         });
-    ui.add_space(8.0);
+        if !has_upstream && !snapshot.remotes.is_empty() {
+            ui.label(egui::RichText::new("Pull y Push se habilitan al publicar la rama o asociar un upstream existente.").weak());
+        }
+        ui.collapsing("Más opciones de sincronización", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Política de Pull");
+                let mut policy = snapshot.pull_policy;
+                egui::ComboBox::from_id_salt("pull_policy").selected_text(match policy {
+                    PullPolicy::FastForwardOnly => "Solo avance rápido",
+                    PullPolicy::Merge => "Merge",
+                    PullPolicy::Rebase => "Rebase",
+                }).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut policy, PullPolicy::FastForwardOnly, "Solo avance rápido");
+                    ui.selectable_value(&mut policy, PullPolicy::Merge, "Merge");
+                    ui.selectable_value(&mut policy, PullPolicy::Rebase, "Rebase");
+                });
+                if policy != snapshot.pull_policy && can_act && action.is_none() { *action = Some(UiAction::SetPullPolicy(policy)); }
+                ui.label(egui::RichText::new("Define cómo integrar al usar Pull.").weak());
+            });
+            let local: Vec<&BranchInfo> = snapshot.branches.iter().filter(|branch| branch.kind == BranchKind::Local).collect();
+            let remote: Vec<&BranchInfo> = snapshot.branches.iter().filter(|branch| branch.kind == BranchKind::Remote).collect();
+            if !local.is_empty() && !remote.is_empty() {
+                let current_local = local.iter().find(|branch| branch.current).map(|branch| branch.name.as_str()).unwrap_or(&repository.branch);
+                if !local.iter().any(|branch| branch.name == state.selected_local_branch) { state.selected_local_branch = current_local.to_owned(); }
+                if !remote.iter().any(|branch| branch.name == state.selected_remote_branch) { state.selected_remote_branch = remote[0].name.clone(); }
+                ui.horizontal_wrapped(|ui| {
+                    egui::ComboBox::from_label("Rama local").selected_text(&state.selected_local_branch).show_ui(ui, |ui| {
+                        for branch in &local { ui.selectable_value(&mut state.selected_local_branch, branch.name.clone(), &branch.name); }
+                    });
+                    egui::ComboBox::from_label("Upstream remoto existente").selected_text(&state.selected_remote_branch).show_ui(ui, |ui| {
+                        for branch in &remote { ui.selectable_value(&mut state.selected_remote_branch, branch.name.clone(), &branch.name); }
+                    });
+                    let set = ui.add_enabled(can_act && action.is_none(), egui::Button::new("Configurar upstream"));
+                    if set.clicked() && action.is_none() { *action = Some(UiAction::SetUpstream { local_branch: state.selected_local_branch.clone(), remote_branch: state.selected_remote_branch.clone() }); }
+                });
+            } else {
+                ui.label(egui::RichText::new("Para asociar un upstream existente, hace falta una rama local y una remota conocidas.").weak());
+            }
+            ui.label(egui::RichText::new(format!("Último Fetch conocido: {}", repository.last_fetch_at.map_or_else(|| "sin dato".to_owned(), format_known_time))).weak());
+        });
+    });
+    ui.add_space(5.0);
+    if repository.files.is_empty() {
+        ui.label(egui::RichText::new("No hay cambios locales sin commit.").weak());
+    } else {
+        render_commit(ui, state, snapshot, can_act, action);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Archivos cambiados · {}", repository.files.len()))
+                    .strong(),
+            );
+            ui.label(egui::RichText::new("Selecciona una fila para revisar su diff.").weak());
+        });
+        for file in &repository.files {
+            render_file_row(
+                ui,
+                state,
+                snapshot,
+                file,
+                repository.has_head,
+                can_act,
+                action,
+            );
+        }
+    }
     render_file_review(ui, state, snapshot, &repository.files, can_act, action);
-    ui.add_space(10.0);
-    render_commit(ui, state, snapshot, can_act, action);
-    ui.label(egui::RichText::new(path.display().to_string()).weak());
 }
-
 fn render_repository_tab(
     ui: &mut egui::Ui,
     state: &mut UiState,
@@ -833,50 +939,27 @@ fn render_repository_tab(
     action: &mut Option<UiAction>,
 ) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.heading("Repositorio");
-            if snapshot.busy {
-                ui.spinner();
-                ui.label("Trabajando…");
-            } else if !snapshot.git_checked {
-                ui.spinner();
-                ui.label("Detectando Git…");
-            } else if let Some(version) = &snapshot.git_version {
-                ui.label(egui::RichText::new(format!("Git detectado · {version}")).weak());
-            } else {
-                ui.label(
-                    egui::RichText::new("Git no está disponible")
-                        .color(ui.visuals().error_fg_color),
-                );
-            }
-        });
+        ui.heading("Configuración del repositorio");
         render_github_login(ui, snapshot, can_act, action);
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("Abrir o inicializar").strong());
+        ui.label(egui::RichText::new("Inicializar repositorio").strong());
         ui.horizontal_wrapped(|ui| {
             ui.label("Ruta");
             let field_width = (ui.available_width() - 250.0).clamp(140.0, 540.0);
             ui.add(
                 egui::TextEdit::singleline(&mut state.repository_path)
-                    .hint_text("Selecciona o escribe una ruta")
+                    .hint_text("Elige una carpeta para inicializar")
                     .desired_width(field_width)
                     .id_source("repository_path"),
             );
             let choose = ui.add_sized([132.0, 40.0], egui::Button::new("Elegir carpeta…"));
             if choose.clicked()
-                && let Some(path) =
-                    choose_folder("Selecciona el repositorio", &state.repository_path)
+                && let Some(path) = choose_folder(
+                    "Selecciona una carpeta para inicializar",
+                    &state.repository_path,
+                )
             {
                 state.repository_path = path.display().to_string();
-            }
-            let open = ui.add_enabled(
-                can_act && !state.repository_path.trim().is_empty(),
-                egui::Button::new("Abrir"),
-            );
-            if open.clicked() && action.is_none() {
-                *action = Some(UiAction::OpenRepository(PathBuf::from(
-                    &state.repository_path,
-                )));
             }
         });
         let selected_path = PathBuf::from(state.repository_path.trim());
@@ -893,7 +976,7 @@ fn render_repository_tab(
                     && existing_repo.is_none(),
                 egui::Button::new("Inicializar"),
             );
-            if initialize.clicked() {
+            if initialize.clicked() && action.is_none() {
                 *action = Some(UiAction::InitializeRepository(selected_path.clone()));
             }
             if let Some(repository_path) = &existing_repo {
@@ -908,26 +991,6 @@ fn render_repository_tab(
                 initialize.on_hover_text("Crear un repositorio Git en esta ruta");
             }
         });
-        if !snapshot.recent_repositories.is_empty() {
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Recientes").strong());
-            ui.horizontal_wrapped(|ui| {
-                for path in &snapshot.recent_repositories {
-                    let label = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .filter(|name| !name.is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| path.display().to_string());
-                    let response = ui
-                        .add_enabled(can_act, egui::Button::new(label).frame(false))
-                        .on_hover_text(path.display().to_string());
-                    if response.clicked() && action.is_none() {
-                        *action = Some(UiAction::OpenRepository(path.clone()));
-                    }
-                }
-            });
-        }
         ui.separator();
         ui.label(egui::RichText::new("Clonar repositorio").strong());
         ui.horizontal_wrapped(|ui| {
@@ -1008,7 +1071,6 @@ fn render_repository_tab(
         }
     });
 }
-
 fn git_repository_for_path(path: &std::path::Path) -> Option<PathBuf> {
     let mut current = path.to_path_buf();
     if current.is_file() {
@@ -1023,125 +1085,6 @@ fn git_repository_for_path(path: &std::path::Path) -> Option<PathBuf> {
             return None;
         }
     }
-}
-
-fn render_sync_tab(
-    ui: &mut egui::Ui,
-    state: &mut UiState,
-    snapshot: &AppSnapshot,
-    can_act: bool,
-    action: &mut Option<UiAction>,
-) {
-    let Some(repository) = &snapshot.repository else {
-        empty_state(
-            ui,
-            "Abre un repositorio",
-            "Las operaciones de sincronización aparecerán aquí.",
-        );
-        return;
-    };
-    let has_upstream = repository.upstream.is_some();
-    let has_current_local_branch = snapshot.branches.iter().any(|branch| {
-        branch.kind == BranchKind::Local && branch.current && branch.name == repository.branch
-    });
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.heading("Sincronizar");
-        ui.horizontal_wrapped(|ui| {
-            let fetch = ui.add_enabled(
-                can_act && !snapshot.remotes.is_empty(),
-                egui::Button::new("Fetch"),
-            );
-            if fetch.clicked() && action.is_none() {
-                *action = Some(UiAction::Fetch);
-            }
-            let pull_label = match snapshot.pull_policy {
-                PullPolicy::FastForwardOnly => "Pull · avance rápido",
-                PullPolicy::Merge => "Pull · merge",
-                PullPolicy::Rebase => "Pull · rebase",
-            };
-            let pull = ui.add_enabled(
-                can_act && has_upstream && has_current_local_branch,
-                egui::Button::new(pull_label),
-            );
-            if pull.clicked() && action.is_none() {
-                *action = Some(UiAction::Pull);
-            }
-            let push = ui.add_enabled(
-                can_act && has_upstream && has_current_local_branch,
-                egui::Button::new("Push"),
-            );
-            if push.clicked() && action.is_none() {
-                *action = Some(UiAction::Push);
-            }
-            if !has_upstream {
-                ui.label(egui::RichText::new("Pull y Push requieren un upstream.").weak());
-            }
-            if !has_current_local_branch {
-                ui.label(egui::RichText::new("Requiere una rama local actual con commit.").weak());
-            }
-        });
-        if snapshot.remotes.is_empty() {
-            ui.label(egui::RichText::new("Configura un remoto para poder hacer fetch.").weak());
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Política de Pull");
-            let mut policy = snapshot.pull_policy;
-            egui::ComboBox::from_id_salt("pull_policy")
-                .selected_text(match policy {
-                    PullPolicy::FastForwardOnly => "Solo avance rápido",
-                    PullPolicy::Merge => "Merge",
-                    PullPolicy::Rebase => "Rebase",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut policy,
-                        PullPolicy::FastForwardOnly,
-                        "Solo avance rápido",
-                    );
-                    ui.selectable_value(&mut policy, PullPolicy::Merge, "Merge");
-                    ui.selectable_value(&mut policy, PullPolicy::Rebase, "Rebase");
-                });
-            if policy != snapshot.pull_policy && can_act && action.is_none() {
-                *action = Some(UiAction::SetPullPolicy(policy));
-            }
-        });
-        ui.label("La política se guarda en Gitzi y determina la estrategia del botón Pull.");
-    });
-    ui.add_space(8.0);
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.heading("Publicación y upstream");
-        ui.horizontal_wrapped(|ui| {
-            if repository.upstream.is_some() {
-                ui.label("Adelante/atrás frente a refs locales conocidas:");
-                ui.label(format!("↑ {} · ↓ {}", repository.ahead, repository.behind));
-                ui.label(egui::RichText::new("Sin consulta remota en tiempo real.").weak());
-            } else {
-                ui.label(egui::RichText::new("Sin upstream: no hay conteo relativo de subida.").weak());
-            }
-        });
-        ui.label(format!("Último fetch conocido: {}", repository.last_fetch_at.map_or_else(|| "sin dato".to_owned(), format_known_time)));
-        let has_current_local_branch = snapshot.branches.iter().any(|branch| branch.kind == BranchKind::Local && branch.current && branch.name == repository.branch);
-        if !snapshot.remotes.is_empty() {
-            let remotes: Vec<String> = snapshot.remotes.iter().map(|remote| remote.name.clone()).collect();
-            if !remotes.iter().any(|name| name == &state.selected_remote) { state.selected_remote.clone_from(&remotes[0]); }
-            egui::ComboBox::from_label("Remoto para publicar").selected_text(&state.selected_remote).show_ui(ui, |ui| { for remote in &remotes { ui.selectable_value(&mut state.selected_remote, remote.clone(), remote); } });
-            let publish = ui.add_enabled(can_act && action.is_none() && has_current_local_branch && repository.has_head == Some(true) && !has_upstream, egui::Button::new("Publicar rama actual y configurar upstream"));
-            if publish.clicked() && action.is_none() { *action = Some(UiAction::PublishBranch(state.selected_remote.clone())); }
-        } else { ui.label(egui::RichText::new("No hay remotos configurados.").weak()); }
-        let local: Vec<&BranchInfo> = snapshot.branches.iter().filter(|branch| branch.kind == BranchKind::Local).collect();
-        let remote: Vec<&BranchInfo> = snapshot.branches.iter().filter(|branch| branch.kind == BranchKind::Remote).collect();
-        if !local.is_empty() && !remote.is_empty() {
-            let current_local = local.iter().find(|branch| branch.current).map(|branch| branch.name.as_str()).unwrap_or(&repository.branch);
-            if !local.iter().any(|branch| branch.name == state.selected_local_branch) { state.selected_local_branch = current_local.to_owned(); }
-            if !remote.iter().any(|branch| branch.name == state.selected_remote_branch) { state.selected_remote_branch = remote[0].name.clone(); }
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_label("Rama local").selected_text(&state.selected_local_branch).show_ui(ui, |ui| { for branch in &local { ui.selectable_value(&mut state.selected_local_branch, branch.name.clone(), &branch.name); } });
-                egui::ComboBox::from_label("Upstream remoto existente").selected_text(&state.selected_remote_branch).show_ui(ui, |ui| { for branch in &remote { ui.selectable_value(&mut state.selected_remote_branch, branch.name.clone(), &branch.name); } });
-                let set = ui.add_enabled(can_act && action.is_none(), egui::Button::new("Configurar upstream"));
-                if set.clicked() && action.is_none() { *action = Some(UiAction::SetUpstream { local_branch: state.selected_local_branch.clone(), remote_branch: state.selected_remote_branch.clone() }); }
-            });
-        } else { ui.label(egui::RichText::new("Para asociar un upstream existente, debe haber una rama local y una remota conocidas.").weak()); }
-    });
 }
 
 fn render_history_tab(
@@ -1833,7 +1776,7 @@ fn render_file_review(
                 }
                 egui::ScrollArea::both()
                     .id_salt(("file_diff", path.clone(), state.selected_area as u8))
-                    .max_height(320.0)
+                    .max_height(160.0)
                     .show(ui, |ui| {
                         ui.monospace(&diff.text);
                     });
@@ -1862,32 +1805,43 @@ fn render_commit(
             .iter()
             .any(|file| file.unmerged || file.index_status == 'U' || file.worktree_status == 'U')
     });
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.label(egui::RichText::new("Crear commit").strong());
-        ui.add(
-            egui::TextEdit::multiline(&mut state.commit_message)
-                .hint_text("Mensaje del commit")
-                .desired_rows(2),
-        );
-        let commit = ui.add_enabled(
-            can_act && has_staged && !has_conflicts && !state.commit_message.trim().is_empty(),
-            egui::Button::new("Crear commit"),
-        );
-        if commit.clicked() && action.is_none() {
-            *action = Some(UiAction::Commit(state.commit_message.clone()));
-        }
-        if has_conflicts {
-            ui.label(
-                egui::RichText::new("Resuelve los conflictos antes de crear un commit.")
-                    .color(ui.visuals().warn_fg_color),
-            );
-        }
-        if !has_staged {
-            ui.label(
-                egui::RichText::new("Prepara al menos un archivo para crear un commit.").weak(),
-            );
-        }
-    });
+    egui::Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .corner_radius(egui::CornerRadius::same(6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Commit").strong());
+                let input_width = (ui.available_width() - 166.0).max(160.0);
+                ui.add_sized(
+                    [input_width, 56.0],
+                    egui::TextEdit::multiline(&mut state.commit_message)
+                        .hint_text("Mensaje del commit")
+                        .desired_rows(2),
+                );
+                let commit = ui.add_enabled(
+                    can_act
+                        && has_staged
+                        && !has_conflicts
+                        && !state.commit_message.trim().is_empty(),
+                    egui::Button::new("Crear commit"),
+                );
+                if commit.clicked() && action.is_none() {
+                    *action = Some(UiAction::Commit(state.commit_message.clone()));
+                }
+            });
+            if has_conflicts {
+                ui.label(
+                    egui::RichText::new("Resuelve los conflictos antes de crear un commit.")
+                        .color(ui.visuals().warn_fg_color),
+                );
+            }
+            if !has_staged {
+                ui.label(
+                    egui::RichText::new("Prepara al menos un archivo para crear un commit.").weak(),
+                );
+            }
+        });
 }
 
 fn preferred_area(file: &FileStatus) -> DiffArea {

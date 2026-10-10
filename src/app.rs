@@ -1226,13 +1226,15 @@ impl eframe::App for GitziApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::bottom("command_terminal")
-            .resizable(true)
-            .default_size(164.0)
-            .size_range(116.0..=228.0)
-            .show(ui, |ui| {
-                ui::render_terminal(ui, &mut self.ui_state, &self.snapshot);
-            });
+        if self.ui_state.terminal_visible() {
+            egui::Panel::bottom("command_terminal")
+                .resizable(true)
+                .default_size(164.0)
+                .size_range(116.0..=228.0)
+                .show(ui, |ui| {
+                    ui::render_terminal(ui, &mut self.ui_state, &self.snapshot);
+                });
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(action) = ui::render(ui, &mut self.ui_state, &self.snapshot) {
                 self.handle_action(action);

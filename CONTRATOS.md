@@ -280,3 +280,44 @@ Contrato T9 publicado antes de delegar. El orquestador es propietario de `src/do
 - El estado inicial programa detección de Git y verificación de sesión GitHub. El snapshot expone `github_auth_checking`; un resultado de autenticación tardío no reemplaza un login o una comprobación más reciente.
 - La lectura automática de estado mantiene una sola solicitud en vuelo, continúa durante el login web si el worker Git está libre, no bloquea acciones de usuario, descarta respuestas de rutas anteriores y repinta con temporizador de bajo costo, sin bucle continuo.
 - Abrir, refrescar y mutar conservan el flujo de inspección/listas ya existente; el polling solo reemplaza el estado del repositorio activo.
+
+## Actualización T10: vista principal de control de código
+
+Contrato T10 de presentación, sin cambios en dominio ni protocolo de Git. El orquestador posee documentación e integración; T10-UI es propietario exclusivo de `src/ui/**`; T10-VERIFY es de solo lectura.
+
+### Interfaz T10 (`src/ui/**`)
+
+- Fusionar Cambios y Sincronizar en la pestaña principal **Control de código**; mantener dentro de ella archivos/diff, preparar/quitar de preparación, descartar, commit, Fetch, Pull, Push, publicación y upstream.
+- Explicar los contadores con texto directo: **N commits por subir** y **N commits por bajar**. Presentarlos como comparación con refs locales conocidas, no como conteo remoto en tiempo real. Rotular acciones en lenguaje de usuario y explicar la política de Pull sin códigos de flecha ambiguos.
+- Mantener scroll vertical en Control de código cuando el contenido exceda el área disponible; no quitar ni bloquear la interacción de scroll. Reducir densidad con tipografía secundaria compacta, menos espacio vertical y botones algo menos altos sin perder área cómoda de clic. Los controles frecuentes de sincronización deben quedar cerca del inicio; la página permite recorrer listas largas y el diff conserva su scroll local.
+- El encabezado fijo conserva repo/rama/limpio-sucio y una señal discreta del último intento de consulta; no debe dar a entender que un intento fallido tuvo éxito. Los contadores ahead/behind se mueven al resumen de Control de código y explican que usan refs locales conocidas.
+- Mover **Abrir repositorio** y el acceso a recientes al encabezado fijo. Usar el selector nativo de carpetas y conservar las operaciones de inicializar/clonar y GitHub/configuración en su sección apropiada.
+- Compactar y alinear la navegación de pestañas para que las secciones secundarias queden legibles y organizadas; conservar sus operaciones y estados existentes.
+- Eliminar el texto/spinner repetitivo de “Actualizando estado” durante el polling automático; conservar la última comprobación solo como señal no intrusiva (sin animación ni texto que aparezca en cada ciclo), y mantener indicadores de carga de acciones explícitas.
+- No cambiar dominio, coordinación, motor Git, política de red ni tamaño de ventana. No crear commits: el usuario integrará esta entrega desde Gitzi.
+
+### Revisión T10
+
+- Confirmar todas las operaciones previas y los estados disabled/loading/error; revisar que el conteo y los botones Pull/Push/Publicar sean claros con y sin upstream.
+- Ejecutar formato, Clippy, pruebas y build integrado si el entorno lo permite. No afirmar revisión visual manual sin abrir la ventana en un host gráfico.
+
+## Actualización T11: lista de cambios estilo Source Control y terminal plegable
+
+Contrato T11 de UX. El orquestador posee `src/app.rs` e integración/documentación; T11-UI es propietario exclusivo de `src/ui/**`; T11-VERIFY es de solo lectura. No se crean commits por indicación del usuario.
+
+### Interfaz T11 (`src/ui/**`)
+
+- Dar espacio legible a la lista de archivos y agruparla visualmente con el compositor de commit. Usar filas compactas de una línea con nombre/estado y acciones pequeñas de icono para preparar, quitar de preparación y descartar; los iconos deben tener tooltips claros y conservar confirmación para descartar.
+- Mantener selección/diff, stage/unstage, commit y estados existentes; preservar el scroll de página para listas largas y el scroll local del diff. Evitar una lista comprimida dentro de un scroll interno estrecho, tarjetas altas y texto repetitivo por archivo.
+- Permitir ocultar la terminal desde su encabezado y volver a mostrarla desde el encabezado fijo de Gitzi. El estado inicial sigue visible; al ocultarla debe liberarse el espacio del panel inferior y el botón para mostrarla debe seguir accesible.
+- `UiState` conserva `terminal_visible: bool` (inicialmente `true`) y expone `pub fn terminal_visible(&self) -> bool`; los controles de UI actualizan el mismo estado.
+- No cambiar el tamaño de ventana, dominio ni comandos Git.
+
+### Integración T11 (`src/app.rs`)
+
+- Mostrar el panel inferior solo cuando la visibilidad registrada por `UiState` esté activa. No destruir transcript ni estado de comandos al ocultar/mostrar; conservar su `UiState`.
+
+### Revisión T11
+
+- Confirmar que todos los botones de archivos siguen invocando sus acciones, descartar conserva confirmación, el compositor de commit respeta staged/conflictos y la terminal se oculta/reabre sin perder entradas.
+- Ejecutar fmt, Clippy, pruebas y build integrado si el entorno lo permite; no afirmar inspección visual manual sin abrir la app en host gráfico.

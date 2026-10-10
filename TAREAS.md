@@ -97,3 +97,26 @@ Contrato publicado en `CONTRATOS.md`. Propiedad exclusiva: orquestador (`src/dom
 | T9-VERIFY | Agente revisor | Revisión independiente del resultado integrado | Sin cambios | T9-APP/GIT/UI integrados | Busca regresiones y verifica el comportamiento requerido; sin cambios de escritura | aceptada |
 
 T9 queda aceptada tras integrar las seis pestañas, el resumen persistente de repositorio y la actualización local periódica, la verificación de `gh` al inicio con timeout y la desactivación de inicialización dentro de repos existentes. La revisión independiente no encontró bloqueantes; se recolectan los monitores terminados en nuevas consultas de autenticación/login. Validación Windows: fmt, `git diff --check`, Clippy con `--deny warnings`, 42/42 pruebas y build release pasan. No se hizo revisión visual manual ni login/cuenta remota real.
+
+## Actualización solicitada T10 — control de código más claro y compacto
+
+Contrato de presentación publicado en `CONTRATOS.md` antes de delegar. El orquestador conserva integración/documentación; T10-UI escribe solo `src/ui/**`; T10-VERIFY revisa en solo lectura. No se crearán commits, por solicitud del usuario.
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T10-UI | Agente de interfaz | Fusionar Cambios+Sincronizar; simplificar ahead/behind; abrir repo fijo; compactar tabs y ocultar ruido de polling | Solo `src/ui/**` | Contrato T10 en `CONTRATOS.md`; snapshot y acciones T1–T9 existentes | Control de código claro; scroll de página disponible; densidad reducida con texto/espacio/botones compactos sin minimizar clics; conserva las operaciones y pestañas secundarias | aceptada |
+| T10-VERIFY | Agente revisor | Revisión independiente del diff integrado | Sin cambios | T10-UI integrado por orquestador | No hay regresiones ni ambigüedad de sincronización; fmt, Clippy, pruebas/build según disponibilidad; limitación visual declarada | aceptada |
+
+T10 integrada tras la aclaración del usuario: **Control de código** combina cambios y sincronización, conserva el scroll vertical de página y el scroll local del diff, y compacta la UI con márgenes, tipografía y botones de 36 px (controles explícitos grandes se conservan). Abrir/Recientes están en el header fijo; el polling es silencioso y el tooltip muestra el último intento. Revisión independiente sin bloqueantes. En Windows pasaron fmt, `git diff --check`, Clippy `--deny warnings`, 42/42 pruebas y build release. No se pudo confirmar visualmente el balance en ventana real. No se creó commit: el usuario lo hará desde Gitzi.
+
+## Actualización solicitada T11 — lista de cambios y terminal ocultable
+
+Contrato T11 publicado antes de delegar. El orquestador integra `src/app.rs` y documentos; T11-UI escribe exclusivamente `src/ui/**`; T11-VERIFY revisa en solo lectura. Sin commits, por instrucción del usuario.
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T11-APP | Orquestador | Integrar visibilidad condicional del panel inferior sin perder transcript | `src/app.rs` | Estado de visibilidad provisto por `UiState`; contrato T11 | Ocultar libera espacio y restaurar conserva entradas/estado; no altera el worker Git | aceptada |
+| T11-UI | Agente de interfaz | Lista Source Control con acciones iconográficas y toggle de terminal | Solo `src/ui/**` | Contrato T11, acciones existentes de T1–T10 | Filas compactas legibles; stage/unstage/discard con tooltips y confirmación; lista junto al commit; ocultar/reabrir terminal desde panel/header; scroll preservado | aceptada |
+| T11-VERIFY | Agente revisor | Revisión independiente del diff integrado | Sin cambios | T11-APP/UI integrados | Acciones y estado conservados; terminal se oculta y restaura sin pérdida; validar con fmt, Clippy, pruebas/build cuando proceda | aceptada |
+
+T11 queda integrada: lista de ancho completo en filas de una línea con estados y botones `+`, `−` y `×`; composer de commit junto a la lista; diff y confirmación de descarte preservados. El toggle de terminal oculta el panel sin borrar transcript y puede restaurarlo desde el encabezado fijo. Revisión T11 independiente sin bloqueantes funcionales. En Windows pasan fmt, `git diff --check`, Clippy con `--deny warnings`, 42/42 pruebas y build release. No hubo inspección gráfica y el usuario conserva la autoría del próximo commit.
