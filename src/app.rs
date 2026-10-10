@@ -1,9 +1,9 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use eframe::egui;
 
 use crate::{
-    domain::{AppSnapshot, CommandEntry, DiffArea, FileStatus, UiAction},
+    domain::{AppSnapshot, BranchKind, CommandEntry, DiffArea, FileStatus, UiAction},
     git::{GitOperation, GitRequest, GitResult, GitWorker},
     settings,
     ui::{self, UiState},
@@ -11,13 +11,18 @@ use crate::{
 
 const COMMAND_LOG_LIMIT: usize = 200;
 
+struct PendingRequest {
+    generation: u64,
+    refresh_after_error: Option<PathBuf>,
+}
+
 pub struct GitziApp {
     snapshot: AppSnapshot,
     worker: GitWorker,
     ui_state: UiState,
     next_request_id: u64,
     generation: u64,
-    pending: HashMap<u64, u64>,
+    pending: HashMap<u64, PendingRequest>,
 }
 
 impl GitziApp {
@@ -40,6 +45,13 @@ impl GitziApp {
 
     fn submit(&mut self, operation: GitOperation, generation: u64) {
         let is_detection = matches!(&operation, GitOperation::DetectGit);
+        let refresh_after_error = match &operation {
+            GitOperation::Fetch(repository) | GitOperation::PullFastForward(repository) => {
+                Some(repository.clone())
+            }
+            GitOperation::PublishBranch { repository, .. } => Some(repository.clone()),
+            _ => None,
+        };
         let id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         let request = GitRequest {
@@ -50,7 +62,13 @@ impl GitziApp {
 
         match self.worker.submit(request) {
             Ok(()) => {
-                self.pending.insert(id, generation);
+                self.pending.insert(
+                    id,
+                    PendingRequest {
+                        generation,
+                        refresh_after_error,
+                    },
+                );
                 self.snapshot.busy = true;
                 self.snapshot.error_message = None;
             }
@@ -63,6 +81,15 @@ impl GitziApp {
         }
     }
 
+    fn submit_preserving_error(&mut self, operation: GitOperation, generation: u64) {
+        let previous_error = self.snapshot.error_message.clone();
+        let request_id = self.next_request_id;
+        self.submit(operation, generation);
+        if self.pending.contains_key(&request_id) {
+            self.snapshot.error_message = previous_error;
+        }
+    }
+
     fn handle_action(&mut self, action: UiAction) {
         if self.snapshot.busy || self.snapshot.git_version.is_none() {
             return;
@@ -71,12 +98,14 @@ impl GitziApp {
         match action {
             UiAction::OpenRepository(path) => {
                 self.generation = self.generation.saturating_add(1);
-                self.snapshot.file_diff = None;
+                self.snapshot.active_repo = Some(path.clone());
+                self.clear_repository_view();
                 self.submit(GitOperation::InspectRepository(path), self.generation);
             }
             UiAction::Refresh => {
                 if let Some(path) = self.snapshot.active_repo.clone() {
                     self.snapshot.file_diff = None;
+                    self.clear_collaboration_state();
                     self.submit(GitOperation::InspectRepository(path), self.generation);
                 }
             }
@@ -87,7 +116,8 @@ impl GitziApp {
                     return;
                 }
                 self.generation = self.generation.saturating_add(1);
-                self.snapshot.file_diff = None;
+                self.snapshot.active_repo = None;
+                self.clear_repository_view();
                 self.submit(GitOperation::InitializeRepository { path }, self.generation);
             }
             UiAction::CloneRepository {
@@ -100,7 +130,8 @@ impl GitziApp {
                     return;
                 }
                 self.generation = self.generation.saturating_add(1);
-                self.snapshot.file_diff = None;
+                self.snapshot.active_repo = None;
+                self.clear_repository_view();
                 self.submit(
                     GitOperation::CloneRepository {
                         source,
@@ -228,7 +259,201 @@ impl GitziApp {
                     self.generation,
                 );
             }
+            action @ (UiAction::Fetch
+            | UiAction::Pull
+            | UiAction::Push
+            | UiAction::PublishBranch(_)
+            | UiAction::SetUpstream { .. }
+            | UiAction::CreateBranch(_)
+            | UiAction::SwitchBranch(_)
+            | UiAction::LoadMoreHistory
+            | UiAction::LoadCommitDetail(_)
+            | UiAction::CompareReferences { .. }) => {
+                self.handle_collaboration_action(action);
+            }
         }
+    }
+
+    fn handle_collaboration_action(&mut self, action: UiAction) {
+        let Some(repository) = self.snapshot.active_repo.clone() else {
+            return;
+        };
+        let Some(status) = self.snapshot.repository.as_ref() else {
+            return;
+        };
+
+        let operation = match action {
+            UiAction::Fetch => {
+                if self.snapshot.remotes.is_empty() {
+                    self.snapshot.error_message =
+                        Some("Configura un remoto en Git antes de hacer Fetch.".into());
+                    return;
+                }
+                GitOperation::Fetch(repository)
+            }
+            UiAction::Pull => {
+                if status.upstream.is_none() || !self.current_branch_is_local(status) {
+                    self.snapshot.error_message = Some(
+                        "Configura o publica el upstream de esta rama antes de hacer Pull.".into(),
+                    );
+                    return;
+                }
+                GitOperation::PullFastForward(repository)
+            }
+            UiAction::Push => {
+                let Some(upstream) = status.upstream.clone() else {
+                    self.snapshot.error_message = Some(
+                        "Configura o publica el upstream de esta rama antes de hacer Push.".into(),
+                    );
+                    return;
+                };
+                if status.has_head != Some(true) || !self.current_branch_is_local(status) {
+                    self.snapshot.error_message =
+                        Some("Push requiere una rama local actual con al menos un commit.".into());
+                    return;
+                }
+                GitOperation::Push {
+                    repository,
+                    local_branch: status.branch.clone(),
+                    upstream,
+                }
+            }
+            UiAction::PublishBranch(remote) => {
+                if status.upstream.is_some() {
+                    self.snapshot.error_message = Some(
+                        "Esta rama ya tiene upstream. Usa Push para enviar sus commits.".into(),
+                    );
+                    return;
+                }
+                if status.has_head != Some(true) || !self.current_branch_is_local(status) {
+                    self.snapshot.error_message = Some(
+                        "Publicar requiere una rama local actual con al menos un commit.".into(),
+                    );
+                    return;
+                }
+                if !self.snapshot.remotes.iter().any(|item| item.name == remote) {
+                    self.snapshot.error_message = Some(
+                        "El remoto elegido ya no está disponible. Actualiza las referencias."
+                            .into(),
+                    );
+                    return;
+                }
+                if status.branch.is_empty() {
+                    self.snapshot.error_message = Some(
+                        "No se puede publicar una rama sin nombre. Crea un commit primero.".into(),
+                    );
+                    return;
+                }
+                GitOperation::PublishBranch {
+                    repository,
+                    remote,
+                    local_branch: status.branch.clone(),
+                }
+            }
+            UiAction::SetUpstream {
+                local_branch,
+                remote_branch,
+            } => {
+                let local_exists =
+                    self.snapshot.branches.iter().any(|branch| {
+                        branch.kind == BranchKind::Local && branch.name == local_branch
+                    });
+                let remote_exists = self.snapshot.branches.iter().any(|branch| {
+                    branch.kind == BranchKind::Remote && branch.name == remote_branch
+                });
+                if !local_exists || !remote_exists {
+                    self.snapshot.error_message = Some(
+                        "La rama local o remota ya no existe. Actualiza la lista de ramas.".into(),
+                    );
+                    return;
+                }
+                GitOperation::SetUpstream {
+                    repository,
+                    local_branch,
+                    remote_branch,
+                }
+            }
+            UiAction::CreateBranch(name) => {
+                if name.trim().is_empty() {
+                    self.snapshot.error_message = Some("Escribe el nombre de la rama.".into());
+                    return;
+                }
+                if status.has_head != Some(true) {
+                    self.snapshot.error_message =
+                        Some("Crea el primer commit antes de crear otra rama.".into());
+                    return;
+                }
+                GitOperation::CreateBranch { repository, name }
+            }
+            UiAction::SwitchBranch(name) => {
+                let branch = self
+                    .snapshot
+                    .branches
+                    .iter()
+                    .find(|branch| branch.kind == BranchKind::Local && branch.name == name);
+                if branch.is_none() {
+                    self.snapshot.error_message = Some(
+                        "La rama local ya no está disponible. Actualiza la lista de ramas.".into(),
+                    );
+                    return;
+                }
+                if status.branch == name {
+                    return;
+                }
+                GitOperation::SwitchBranch { repository, name }
+            }
+            UiAction::LoadMoreHistory => {
+                if !self.snapshot.history_has_more {
+                    return;
+                }
+                GitOperation::LoadHistory {
+                    repository,
+                    offset: self.snapshot.history.len(),
+                    limit: 30,
+                }
+            }
+            UiAction::LoadCommitDetail(commit_id) => {
+                if !self
+                    .snapshot
+                    .history
+                    .iter()
+                    .any(|commit| commit.id == commit_id)
+                {
+                    self.snapshot.error_message =
+                        Some("Ese commit ya no está en la página cargada.".into());
+                    return;
+                }
+                self.snapshot.commit_detail = None;
+                GitOperation::LoadCommitDetail {
+                    repository,
+                    commit_id,
+                }
+            }
+            UiAction::CompareReferences {
+                base_ref,
+                target_ref,
+            } => {
+                let available = |reference: &str| {
+                    self.snapshot
+                        .branches
+                        .iter()
+                        .any(|branch| branch.name == reference)
+                };
+                if base_ref == target_ref || !available(&base_ref) || !available(&target_ref) {
+                    self.snapshot.error_message =
+                        Some("Elige dos referencias distintas de la lista de ramas actual.".into());
+                    return;
+                }
+                self.snapshot.ref_comparison = None;
+                GitOperation::CompareReferences {
+                    repository,
+                    base_ref,
+                    target_ref,
+                }
+            }
+            _ => return,
+        };
+        self.submit(operation, self.generation);
     }
 
     fn file_status(&self, path: &std::path::Path) -> Option<&FileStatus> {
@@ -240,9 +465,19 @@ impl GitziApp {
             .find(|file| file.path == path)
     }
 
+    fn current_branch_is_local(&self, status: &crate::domain::RepositoryStatus) -> bool {
+        self.snapshot.branches.iter().any(|branch| {
+            branch.kind == BranchKind::Local && branch.current && branch.name == status.branch
+        })
+    }
+
     fn receive_responses(&mut self) {
         while let Some(response) = self.worker.try_recv() {
-            let is_current = self.pending.remove(&response.id) == Some(response.generation);
+            let pending = self.pending.remove(&response.id);
+            let is_current = pending
+                .as_ref()
+                .is_some_and(|request| request.generation == response.generation);
+            let refresh_after_error = pending.and_then(|request| request.refresh_after_error);
             self.snapshot.busy = !self.pending.is_empty();
             self.append_commands(response.commands);
 
@@ -256,11 +491,25 @@ impl GitziApp {
                     self.snapshot.git_version = Some(version);
                 }
                 Ok(GitResult::RepositoryInspected { path, status }) => {
+                    if self.snapshot.active_repo.as_ref() != Some(&path) {
+                        self.clear_collaboration_state();
+                    }
                     self.snapshot.active_repo = Some(path.clone());
                     self.snapshot.repository = Some(status);
-                    self.snapshot.error_message = None;
                     self.snapshot.file_diff = None;
                     settings::remember_repository(&path, &mut self.snapshot.recent_repositories);
+                    self.submit_preserving_error(
+                        GitOperation::ListBranches(path.clone()),
+                        self.generation,
+                    );
+                    self.submit_preserving_error(
+                        GitOperation::LoadHistory {
+                            repository: path,
+                            offset: 0,
+                            limit: 30,
+                        },
+                        self.generation,
+                    );
                 }
                 Ok(GitResult::RepositoryInitialized { path })
                 | Ok(GitResult::RepositoryCloned { path }) => {
@@ -289,10 +538,55 @@ impl GitziApp {
                 | Ok(GitResult::CommitCreated { path }) => {
                     self.refresh_after_mutation(path);
                 }
+                Ok(GitResult::BranchesListed {
+                    repository,
+                    branches,
+                    remotes,
+                }) if self.snapshot.active_repo.as_ref() == Some(&repository) => {
+                    self.snapshot.branches = branches;
+                    self.snapshot.remotes = remotes;
+                }
+                Ok(GitResult::HistoryLoaded {
+                    repository,
+                    offset,
+                    commits,
+                    has_more,
+                }) if self.snapshot.active_repo.as_ref() == Some(&repository) => {
+                    if offset == 0 {
+                        self.snapshot.history = commits;
+                    } else if offset == self.snapshot.history.len() {
+                        self.snapshot.history.extend(commits);
+                    }
+                    self.snapshot.history_has_more = has_more;
+                }
+                Ok(GitResult::CommitLoaded { repository, detail })
+                    if self.snapshot.active_repo.as_ref() == Some(&repository) =>
+                {
+                    self.snapshot.commit_detail = Some(detail);
+                }
+                Ok(GitResult::ReferencesCompared {
+                    repository,
+                    comparison,
+                }) if self.snapshot.active_repo.as_ref() == Some(&repository) => {
+                    self.snapshot.ref_comparison = Some(comparison);
+                }
+                Ok(GitResult::BranchCreated { repository })
+                | Ok(GitResult::BranchSwitched { repository })
+                | Ok(GitResult::UpstreamSet { repository })
+                | Ok(GitResult::Fetched { repository })
+                | Ok(GitResult::Pulled { repository })
+                | Ok(GitResult::Pushed { repository })
+                | Ok(GitResult::BranchPublished { repository }) => {
+                    self.refresh_after_mutation(repository);
+                }
                 Err(error) => {
                     self.snapshot.git_checked = true;
                     self.snapshot.error_message = Some(error.message);
+                    if let Some(repository) = refresh_after_error {
+                        self.refresh_after_error(repository);
+                    }
                 }
+                Ok(_) => {}
             }
         }
     }
@@ -300,9 +594,35 @@ impl GitziApp {
     fn refresh_after_mutation(&mut self, repository: std::path::PathBuf) {
         if self.snapshot.active_repo.as_ref() == Some(&repository) {
             self.snapshot.file_diff = None;
-            self.snapshot.repository = None;
+            self.clear_collaboration_state();
             self.submit(GitOperation::InspectRepository(repository), self.generation);
         }
+    }
+
+    fn refresh_after_error(&mut self, repository: PathBuf) {
+        if self.snapshot.active_repo.as_ref() == Some(&repository) {
+            self.snapshot.file_diff = None;
+            self.clear_collaboration_state();
+            self.submit_preserving_error(
+                GitOperation::InspectRepository(repository),
+                self.generation,
+            );
+        }
+    }
+
+    fn clear_collaboration_state(&mut self) {
+        self.snapshot.branches.clear();
+        self.snapshot.remotes.clear();
+        self.snapshot.history.clear();
+        self.snapshot.history_has_more = false;
+        self.snapshot.commit_detail = None;
+        self.snapshot.ref_comparison = None;
+    }
+
+    fn clear_repository_view(&mut self) {
+        self.snapshot.repository = None;
+        self.snapshot.file_diff = None;
+        self.clear_collaboration_state();
     }
 
     fn append_commands(&mut self, commands: Vec<CommandEntry>) {

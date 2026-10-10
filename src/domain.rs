@@ -9,8 +9,59 @@ pub struct RepositoryStatus {
     pub upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
+    pub last_fetch_at: Option<SystemTime>,
     pub has_head: Option<bool>,
     pub files: Vec<FileStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchKind {
+    Local,
+    Remote,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchInfo {
+    pub name: String,
+    pub kind: BranchKind,
+    pub current: bool,
+    pub upstream: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteInfo {
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitSummary {
+    pub id: String,
+    pub author: String,
+    pub authored_at: SystemTime,
+    pub subject: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitFileChange {
+    pub status: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitDetail {
+    pub summary: CommitSummary,
+    pub message: String,
+    pub changed_files: Vec<CommitFileChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefComparison {
+    pub base_ref: String,
+    pub target_ref: String,
+    pub commits_ahead: u32,
+    pub commits_behind: u32,
+    pub diff: String,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,6 +119,12 @@ pub struct AppSnapshot {
     pub recent_repositories: Vec<PathBuf>,
     pub command_log: Vec<CommandEntry>,
     pub file_diff: Option<FileDiff>,
+    pub branches: Vec<BranchInfo>,
+    pub remotes: Vec<RemoteInfo>,
+    pub history: Vec<CommitSummary>,
+    pub history_has_more: bool,
+    pub commit_detail: Option<CommitDetail>,
+    pub ref_comparison: Option<RefComparison>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,4 +143,20 @@ pub enum UiAction {
     StageFile(PathBuf),
     UnstageFile(PathBuf),
     Commit(String),
+    Fetch,
+    Pull,
+    Push,
+    PublishBranch(String),
+    SetUpstream {
+        local_branch: String,
+        remote_branch: String,
+    },
+    CreateBranch(String),
+    SwitchBranch(String),
+    LoadMoreHistory,
+    LoadCommitDetail(String),
+    CompareReferences {
+        base_ref: String,
+        target_ref: String,
+    },
 }

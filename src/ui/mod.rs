@@ -5,7 +5,10 @@ use std::{
 
 use eframe::egui;
 
-use crate::domain::{AppSnapshot, CommandEntry, CommandStatus, DiffArea, FileStatus, UiAction};
+use crate::domain::{
+    AppSnapshot, BranchInfo, BranchKind, CommandEntry, CommandStatus, DiffArea, FileStatus,
+    UiAction,
+};
 
 pub struct UiState {
     repository_path: String,
@@ -16,6 +19,13 @@ pub struct UiState {
     selected_area: DiffArea,
     requested_diff: Option<(PathBuf, PathBuf, DiffArea)>,
     commit_message: String,
+    branch_name: String,
+    selected_local_branch: String,
+    selected_remote: String,
+    selected_remote_branch: String,
+    selected_commit: Option<String>,
+    compare_base: String,
+    compare_target: String,
     command_log_open: bool,
     copied_command: Option<u64>,
 }
@@ -31,6 +41,13 @@ impl Default for UiState {
             selected_area: DiffArea::Unstaged,
             requested_diff: None,
             commit_message: String::new(),
+            branch_name: String::new(),
+            selected_local_branch: String::new(),
+            selected_remote: String::new(),
+            selected_remote_branch: String::new(),
+            selected_commit: None,
+            compare_base: String::new(),
+            compare_target: String::new(),
             command_log_open: false,
             copied_command: None,
         }
@@ -42,6 +59,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
         state.active_repository = snapshot.active_repo.clone();
         state.selected_file = None;
         state.requested_diff = None;
+        state.selected_commit = None;
     }
     let available = snapshot.git_checked && snapshot.git_version.is_some();
     let can_act = available && !snapshot.busy;
@@ -245,6 +263,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                 });
             });
             ui.add_space(8.0);
+            render_collaboration(ui, state, snapshot, can_act, &mut action);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Archivos").strong());
                 ui.label(egui::RichText::new(repository.files.len().to_string()).weak());
@@ -380,6 +400,212 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
     });
     state.command_log_open = log_response.body_returned.is_some();
     action
+}
+
+fn render_collaboration(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    snapshot: &AppSnapshot,
+    can_act: bool,
+    action: &mut Option<UiAction>,
+) {
+    let Some(repository) = &snapshot.repository else {
+        return;
+    };
+    let has_upstream = repository.upstream.is_some();
+    let has_current_local_branch = snapshot.branches.iter().any(|branch| {
+        branch.kind == BranchKind::Local && branch.current && branch.name == repository.branch
+    });
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.heading("Colaboración");
+        ui.horizontal_wrapped(|ui| {
+            let fetch = ui.add_enabled(
+                can_act && !snapshot.remotes.is_empty(),
+                egui::Button::new("Fetch"),
+            );
+            if fetch.clicked() && action.is_none() {
+                *action = Some(UiAction::Fetch);
+            }
+            if snapshot.remotes.is_empty() {
+                ui.label(egui::RichText::new("Configura un remoto para poder hacer fetch.").weak());
+            }
+            let pull = ui.add_enabled(
+                can_act && has_upstream && has_current_local_branch,
+                egui::Button::new("Pull · avance rápido"),
+            );
+            if pull.clicked() && action.is_none() {
+                *action = Some(UiAction::Pull);
+            }
+            let push = ui.add_enabled(
+                can_act && has_upstream && has_current_local_branch,
+                egui::Button::new("Push"),
+            );
+            if push.clicked() && action.is_none() {
+                *action = Some(UiAction::Push);
+            }
+            if !has_upstream {
+                ui.label(egui::RichText::new("Pull y Push requieren upstream. Publica esta rama o configura uno existente abajo.").weak());
+            }
+            if !has_current_local_branch {
+                ui.label(egui::RichText::new("Pull y Push requieren una rama local actual; no están disponibles en HEAD separado o sin commits.").weak());
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Adelante/atrás respecto a referencias locales conocidas:");
+            ui.label(format!("↑ {} · ↓ {}", repository.ahead, repository.behind));
+            ui.label(egui::RichText::new("No es una consulta remota en tiempo real.").weak());
+            ui.separator();
+            ui.label("Último fetch conocido:");
+            ui.label(repository.last_fetch_at.map_or_else(|| "sin dato".to_owned(), format_known_time));
+        });
+
+        ui.collapsing("Ramas y upstream", |ui| {
+            ui.label(egui::RichText::new("Ramas conocidas localmente").strong());
+            if snapshot.branches.is_empty() {
+                if snapshot.busy { loading_state(ui, "Cargando ramas…"); }
+                else { ui.label(egui::RichText::new("No hay ramas disponibles.").weak()); }
+            } else {
+                egui::ScrollArea::vertical().id_salt("branches_list").max_height(110.0).show(ui, |ui| {
+                    for branch in &snapshot.branches {
+                        ui.horizontal_wrapped(|ui| {
+                            let kind = match branch.kind { BranchKind::Local => "Local", BranchKind::Remote => "Remota" };
+                            ui.label(format!("{kind} · {}{}", branch.name, if branch.current { " · actual" } else { "" }));
+                            if let Some(upstream) = &branch.upstream { ui.label(egui::RichText::new(format!("→ {upstream}")).weak()); }
+                            if branch.kind == BranchKind::Local && !branch.current {
+                                let switch = ui.add_enabled(can_act && action.is_none(), egui::Button::new("Cambiar"));
+                                if switch.clicked() && action.is_none() { *action = Some(UiAction::SwitchBranch(branch.name.clone())); }
+                            }
+                        });
+                    }
+                });
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut state.branch_name).hint_text("Nombre de nueva rama").desired_width(190.0));
+                let create = ui.add_enabled(can_act && action.is_none() && !state.branch_name.trim().is_empty() && repository.has_head == Some(true), egui::Button::new("Crear y cambiar"));
+                if create.clicked() && action.is_none() { *action = Some(UiAction::CreateBranch(state.branch_name.trim().to_owned())); }
+            });
+            if repository.has_head == Some(false) {
+                ui.label(egui::RichText::new("Crea el primer commit antes de crear otra rama.").weak());
+            }
+
+            let remotes: Vec<String> = snapshot.remotes.iter().map(|remote| remote.name.clone()).collect();
+            let remote_branches: Vec<&BranchInfo> = snapshot.branches.iter().filter(|branch| branch.kind == BranchKind::Remote).collect();
+            if !remotes.is_empty() {
+                if !remotes.iter().any(|name| name == &state.selected_remote) { state.selected_remote.clone_from(&remotes[0]); }
+                egui::ComboBox::from_label("Remoto para publicar").selected_text(&state.selected_remote).show_ui(ui, |ui| {
+                    for remote in &remotes { ui.selectable_value(&mut state.selected_remote, remote.clone(), remote); }
+                });
+                let publish = ui.add_enabled(can_act && action.is_none() && has_current_local_branch && repository.has_head == Some(true) && !has_upstream, egui::Button::new("Publicar rama actual y configurar upstream"));
+                if publish.clicked() && action.is_none() { *action = Some(UiAction::PublishBranch(state.selected_remote.clone())); }
+            } else { ui.label(egui::RichText::new("No hay remotos configurados; no se puede publicar.").weak()); }
+
+            let local_branches: Vec<&BranchInfo> = snapshot.branches.iter().filter(|branch| branch.kind == BranchKind::Local).collect();
+            let current_local = local_branches.iter().find(|branch| branch.current).map(|branch| branch.name.as_str()).unwrap_or(&repository.branch);
+            if !local_branches.is_empty() && !remote_branches.is_empty() {
+                if !local_branches.iter().any(|branch| branch.name == state.selected_local_branch) { state.selected_local_branch = current_local.to_owned(); }
+                if !remote_branches.iter().any(|branch| branch.name == state.selected_remote_branch) { state.selected_remote_branch = remote_branches[0].name.clone(); }
+                ui.horizontal_wrapped(|ui| {
+                    egui::ComboBox::from_label("Rama local").selected_text(&state.selected_local_branch).show_ui(ui, |ui| {
+                        for branch in &local_branches { ui.selectable_value(&mut state.selected_local_branch, branch.name.clone(), &branch.name); }
+                    });
+                    egui::ComboBox::from_label("Upstream remoto existente").selected_text(&state.selected_remote_branch).show_ui(ui, |ui| {
+                        for branch in &remote_branches { ui.selectable_value(&mut state.selected_remote_branch, branch.name.clone(), &branch.name); }
+                    });
+                    let set = ui.add_enabled(can_act && action.is_none(), egui::Button::new("Configurar upstream"));
+                    if set.clicked() && action.is_none() { *action = Some(UiAction::SetUpstream { local_branch: state.selected_local_branch.clone(), remote_branch: state.selected_remote_branch.clone() }); }
+                });
+            } else { ui.label(egui::RichText::new("Para asociar un upstream existente, primero debe haber una rama local y una remota conocidas.").weak()); }
+        });
+
+        ui.collapsing("Historial y comparación", |ui| {
+            if snapshot.history.is_empty() {
+                if snapshot.busy { loading_state(ui, "Cargando historial…"); }
+                else { ui.label(egui::RichText::new("No hay commits para mostrar.").weak()); }
+            }
+            egui::ScrollArea::vertical().id_salt("history_list").max_height(180.0).show(ui, |ui| {
+                for commit in &snapshot.history {
+                    ui.horizontal_wrapped(|ui| {
+                        let selected = state.selected_commit.as_deref() == Some(&commit.id);
+                        let response = ui.selectable_label(selected, format!("{} · {}", short_id(&commit.id), commit.subject));
+                        if response.clicked() && action.is_none() && can_act {
+                            state.selected_commit = Some(commit.id.clone());
+                            *action = Some(UiAction::LoadCommitDetail(commit.id.clone()));
+                        }
+                        ui.label(egui::RichText::new(format!("{} · {}", commit.author, format_known_time(commit.authored_at))).weak());
+                    });
+                }
+            });
+            if snapshot.history_has_more {
+                let more = ui.add_enabled(can_act && action.is_none(), egui::Button::new("Cargar más commits"));
+                if more.clicked() && action.is_none() { *action = Some(UiAction::LoadMoreHistory); }
+            }
+            if let Some(detail) = &snapshot.commit_detail {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label(egui::RichText::new(format!("Commit {} · {}", short_id(&detail.summary.id), detail.summary.subject)).strong());
+                    ui.label(format!("Autor: {} · {}", detail.summary.author, format_known_time(detail.summary.authored_at)));
+                    ui.monospace(&detail.message);
+                    ui.label(format!("Archivos modificados ({})", detail.changed_files.len()));
+                    for file in &detail.changed_files { ui.label(format!("{}  {}", file.status, file.path.display())); }
+                });
+            } else if state.selected_commit.is_some() && snapshot.busy { loading_state(ui, "Cargando detalle del commit…"); }
+
+            let refs: Vec<String> = snapshot.branches.iter().map(|branch| branch.name.clone()).collect();
+            if refs.is_empty() { ui.label(egui::RichText::new("Cargar ramas para comparar referencias.").weak()); }
+            else {
+                if !refs.iter().any(|name| name == &state.compare_base) { state.compare_base.clone_from(&refs[0]); }
+                if !refs.iter().any(|name| name == &state.compare_target) { state.compare_target = refs.get(1).unwrap_or(&refs[0]).clone(); }
+                ui.horizontal_wrapped(|ui| {
+                    egui::ComboBox::from_label("Base").selected_text(&state.compare_base).show_ui(ui, |ui| {
+                        for reference in &refs { ui.selectable_value(&mut state.compare_base, reference.clone(), reference); }
+                    });
+                    egui::ComboBox::from_label("Objetivo").selected_text(&state.compare_target).show_ui(ui, |ui| {
+                        for reference in &refs { ui.selectable_value(&mut state.compare_target, reference.clone(), reference); }
+                    });
+                    let compare = ui.add_enabled(can_act && action.is_none() && state.compare_base != state.compare_target, egui::Button::new("Comparar"));
+                    if compare.clicked() && action.is_none() { *action = Some(UiAction::CompareReferences { base_ref: state.compare_base.clone(), target_ref: state.compare_target.clone() }); }
+                });
+                if let Some(comparison) = snapshot.ref_comparison.as_ref().filter(|comparison| {
+                    comparison.base_ref == state.compare_base
+                        && comparison.target_ref == state.compare_target
+                }) {
+                    ui.label(format!("{} → {} · ↑ {} commits · ↓ {} commits", comparison.base_ref, comparison.target_ref, comparison.commits_ahead, comparison.commits_behind));
+                    if comparison.truncated { ui.label(egui::RichText::new("Diff truncado; el contenido está incompleto.").color(ui.visuals().warn_fg_color)); }
+                    egui::ScrollArea::vertical().id_salt("ref_comparison").max_height(230.0).show(ui, |ui| ui.monospace(&comparison.diff));
+                } else {
+                    ui.label(egui::RichText::new("Pulsa Comparar para cargar el resultado de estas referencias.").weak());
+                }
+            }
+        });
+    });
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..id.len().min(12)).unwrap_or(id)
+}
+
+fn format_known_time(time: std::time::SystemTime) -> String {
+    let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
+        return "fecha anterior a 1970".to_owned();
+    };
+    let seconds = duration.as_secs();
+    let days = (seconds / 86_400) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let seconds_of_day = seconds % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        seconds_of_day / 3_600,
+        (seconds_of_day / 60) % 60
+    )
 }
 
 fn loading_state(ui: &mut egui::Ui, text: &str) {

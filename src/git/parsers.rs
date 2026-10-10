@@ -105,14 +105,14 @@ fn split_fields(record: &[u8], expected: usize) -> Result<Vec<&[u8]>, String> {
 }
 
 #[cfg(unix)]
-fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+pub(super) fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     PathBuf::from(OsString::from_vec(bytes.to_vec()))
 }
 
 #[cfg(not(unix))]
-fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+pub(super) fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
