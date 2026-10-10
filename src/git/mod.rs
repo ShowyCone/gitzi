@@ -16,12 +16,24 @@ pub use runner::{GitError, GitOperation, GitRequest, GitResponse, GitResult};
 
 const REQUEST_QUEUE_CAPACITY: usize = 32;
 
+fn reap_finished_process_watchers(handles: &mut Vec<thread::JoinHandle<()>>) {
+    let mut active = Vec::with_capacity(handles.len());
+    for handle in handles.drain(..) {
+        if handle.is_finished() {
+            let _ = handle.join();
+        } else {
+            active.push(handle);
+        }
+    }
+    *handles = active;
+}
+
 /// A single background worker. Submissions never wait for queue capacity.
 pub struct GitWorker {
     requests: SyncSender<GitRequest>,
     responses: Receiver<GitResponse>,
     shutdown: Arc<AtomicBool>,
-    login_watchers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+    process_watchers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
 }
 
 impl GitWorker {
@@ -30,59 +42,71 @@ impl GitWorker {
         let (response_tx, response_rx) = mpsc::channel::<GitResponse>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
-        let login_watchers = Arc::new(Mutex::new(Vec::new()));
-        let worker_login_watchers = Arc::clone(&login_watchers);
+        let process_watchers = Arc::new(Mutex::new(Vec::new()));
+        let worker_process_watchers = Arc::clone(&process_watchers);
         thread::Builder::new()
             .name("gitzi-git-worker".into())
             .spawn(move || {
                 while let Ok(request) = request_rx.recv() {
-                    let is_login =
-                        matches!(&request.operation, GitOperation::StartGitHubBrowserLogin);
-                    let mut watcher_handles = if is_login {
+                    let needs_watcher_lock = matches!(
+                        &request.operation,
+                        GitOperation::StartGitHubBrowserLogin | GitOperation::CheckGitHubAuth
+                    );
+                    let mut watcher_handles = if needs_watcher_lock {
                         Some(
-                            worker_login_watchers
+                            worker_process_watchers
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner),
                         )
                     } else {
                         None
                     };
+                    if let Some(handles) = watcher_handles.as_mut() {
+                        reap_finished_process_watchers(handles);
+                    }
                     if worker_shutdown.load(Ordering::Acquire) {
                         break;
                     }
-                    let (response, login_watcher) =
-                        runner::handle_request_with_monitor(request, Arc::clone(&worker_shutdown));
-                    if response_tx.send(response).is_err() {
-                        break;
-                    }
-                    if let Some(login_watcher) = login_watcher {
-                        let login_responses = response_tx.clone();
-                        let watcher = Arc::new(Mutex::new(Some(login_watcher)));
-                        let thread_watcher = Arc::clone(&watcher);
-                        let monitor = thread::Builder::new()
-                            .name("gitzi-github-login-watcher".into())
-                            .spawn(move || {
-                                let login_watcher = thread_watcher
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut watcher| watcher.take());
-                                if let Some(login_watcher) = login_watcher {
-                                    let response = login_watcher.wait_for_completion();
-                                    let _ = login_responses.send(response);
-                                }
-                            });
-                        match monitor {
-                            Ok(handle) => {
-                                if let Some(handles) = watcher_handles.as_mut() {
-                                    handles.push(handle);
-                                }
+                    match runner::execute_request(request, Arc::clone(&worker_shutdown)) {
+                        runner::RequestExecution::Immediate(response) => {
+                            if response_tx.send(response).is_err() {
+                                break;
                             }
-                            Err(error) => {
-                                let login_watcher =
-                                    watcher.lock().ok().and_then(|mut watcher| watcher.take());
-                                if let Some(login_watcher) = login_watcher {
-                                    let response = login_watcher.monitor_start_failed(error);
-                                    let _ = response_tx.send(response);
+                        }
+                        runner::RequestExecution::Background { initial, watcher } => {
+                            if let Some(initial) = initial
+                                && response_tx.send(initial).is_err()
+                            {
+                                break;
+                            }
+                            let watcher_responses = response_tx.clone();
+                            let watcher = Arc::new(Mutex::new(Some(*watcher)));
+                            let thread_watcher = Arc::clone(&watcher);
+                            let monitor = thread::Builder::new()
+                                .name("gitzi-background-process-watcher".into())
+                                .spawn(move || {
+                                    let watcher = thread_watcher
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut watcher| watcher.take());
+                                    if let Some(watcher) = watcher {
+                                        let response = watcher.wait_for_completion();
+                                        let _ = watcher_responses.send(response);
+                                    }
+                                });
+                            match monitor {
+                                Ok(handle) => {
+                                    if let Some(handles) = watcher_handles.as_mut() {
+                                        handles.push(handle);
+                                    }
+                                }
+                                Err(error) => {
+                                    let watcher =
+                                        watcher.lock().ok().and_then(|mut watcher| watcher.take());
+                                    if let Some(watcher) = watcher {
+                                        let response = watcher.monitor_start_failed(error);
+                                        let _ = response_tx.send(response);
+                                    }
                                 }
                             }
                         }
@@ -94,7 +118,7 @@ impl GitWorker {
             requests: request_tx,
             responses: response_rx,
             shutdown,
-            login_watchers,
+            process_watchers,
         }
     }
 
@@ -120,7 +144,7 @@ impl Drop for GitWorker {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         let watcher_handles = self
-            .login_watchers
+            .process_watchers
             .lock()
             .map(|mut handles| std::mem::take(&mut *handles))
             .unwrap_or_default();
@@ -231,6 +255,20 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn raw_git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
     fn configure_and_commit(root: &Path, filename: &str, body: &str) {
@@ -446,6 +484,106 @@ mod tests {
             }
             other => panic!("unexpected result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn refreshes_local_status_with_ahead_behind_and_preserves_the_index() {
+        let base = TestDirectory::new("refresh-local-status");
+        let remote = base.path().join("remote.git");
+        let init_remote = Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&remote)
+            .current_dir(base.path())
+            .output()
+            .unwrap();
+        assert!(
+            init_remote.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init_remote.stderr)
+        );
+
+        let local = base.path().join("local");
+        fs::create_dir_all(&local).unwrap();
+        git(&local, &["init", "-q"]);
+        git(&local, &["config", "user.name", "Gitzi Test"]);
+        git(
+            &local,
+            &["config", "user.email", "gitzi-test@example.invalid"],
+        );
+        configure_and_commit(&local, "base.txt", "base\n");
+        let branch = raw_git(&local, &["branch", "--show-current"]);
+        let remote_url = remote.to_string_lossy().into_owned();
+        git(&local, &["remote", "add", "origin", &remote_url]);
+        git(&local, &["push", "-u", "origin", "HEAD"]);
+
+        let peer = base.path().join("peer");
+        let clone = Command::new("git")
+            .args(["clone", "-q"])
+            .arg(&remote)
+            .arg(&peer)
+            .output()
+            .unwrap();
+        assert!(
+            clone.status.success(),
+            "{}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
+        git(&peer, &["config", "user.name", "Gitzi Peer"]);
+        git(
+            &peer,
+            &["config", "user.email", "gitzi-peer@example.invalid"],
+        );
+        configure_and_commit(&peer, "remote.txt", "remote commit\n");
+        git(&peer, &["push", "origin", "HEAD"]);
+
+        git(&local, &["fetch", "origin"]);
+        configure_and_commit(&local, "local.txt", "local commit\n");
+        fs::write(local.join("staged file.txt"), "staged\n").unwrap();
+        git(&local, &["add", "--", "staged file.txt"]);
+        fs::write(local.join("untracked file.txt"), "untracked\n").unwrap();
+        let index_path = local.join(".git").join("index");
+        let index_before = fs::read(&index_path).unwrap();
+
+        let worker = GitWorker::spawn();
+        let refreshed = response(
+            &worker,
+            24,
+            GitOperation::RefreshRepositoryStatus(local.clone()),
+        );
+        assert_eq!((refreshed.id, refreshed.generation), (24, 1));
+        let status = match refreshed.result.unwrap() {
+            GitResult::RepositoryStatusRefreshed { path, status } => {
+                assert_eq!(path, local);
+                status
+            }
+            other => panic!("unexpected result: {other:?}"),
+        };
+        assert_eq!(status.branch, branch);
+        assert_eq!(
+            status.upstream.as_deref(),
+            Some(format!("origin/{branch}").as_str())
+        );
+        assert_eq!((status.ahead, status.behind), (1, 1));
+        assert!(status.last_fetch_at.is_some());
+        assert_eq!(status.integration, None);
+        assert!(status.files.iter().any(|file| {
+            file.path.as_path() == Path::new("staged file.txt") && file.index_status == 'A'
+        }));
+        assert!(status.files.iter().any(|file| {
+            file.path.as_path() == Path::new("untracked file.txt")
+                && file.index_status == '?'
+                && file.worktree_status == '?'
+        }));
+        assert_eq!(fs::read(index_path).unwrap(), index_before);
+        assert!(refreshed.commands[0].command_display.contains(
+            "--no-optional-locks status --porcelain=v2 --branch -z --untracked-files=all"
+        ));
+        assert!(
+            !refreshed
+                .commands
+                .iter()
+                .any(|command| command.command_display.starts_with("git fetch"))
+        );
     }
 
     #[test]

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    time::{Duration, Instant, SystemTime},
+};
 
 use eframe::egui;
 
@@ -13,11 +17,11 @@ use crate::{
 };
 
 const COMMAND_LOG_LIMIT: usize = 200;
+const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
 struct PendingRequest {
     generation: u64,
     refresh_after_error: Option<PathBuf>,
-    auth_check_started_during_login: bool,
 }
 
 pub struct GitziApp {
@@ -28,6 +32,10 @@ pub struct GitziApp {
     generation: u64,
     pending: HashMap<u64, PendingRequest>,
     github_login_process_active: bool,
+    github_auth_epoch: u64,
+    auth_check_request: Option<(u64, u64)>,
+    status_refresh_request: Option<(u64, PathBuf)>,
+    last_status_refresh_started: Option<Instant>,
 }
 
 impl GitziApp {
@@ -46,16 +54,19 @@ impl GitziApp {
             generation: 0,
             pending: HashMap::new(),
             github_login_process_active: false,
+            github_auth_epoch: 0,
+            auth_check_request: None,
+            status_refresh_request: None,
+            last_status_refresh_started: None,
         };
 
         app.submit(GitOperation::DetectGit, 0);
+        app.request_github_auth_check();
         app
     }
 
     fn submit(&mut self, operation: GitOperation, generation: u64) {
         let is_detection = matches!(&operation, GitOperation::DetectGit);
-        let auth_check_started_during_login =
-            matches!(&operation, GitOperation::CheckGitHubAuth) && self.github_login_process_active;
         let refresh_after_error = match &operation {
             GitOperation::Fetch(repository) => Some(repository.clone()),
             GitOperation::Pull { repository, .. }
@@ -94,7 +105,6 @@ impl GitziApp {
                     PendingRequest {
                         generation,
                         refresh_after_error,
-                        auth_check_started_during_login,
                     },
                 );
                 self.snapshot.busy = true;
@@ -104,6 +114,29 @@ impl GitziApp {
                 if is_detection {
                     self.snapshot.git_checked = true;
                 }
+                self.snapshot.error_message = Some(error.message);
+            }
+        }
+    }
+
+    fn request_github_auth_check(&mut self) {
+        if self.auth_check_request.is_some() {
+            return;
+        }
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let request = GitRequest {
+            id,
+            generation: 0,
+            operation: GitOperation::CheckGitHubAuth,
+        };
+        match self.worker.submit(request) {
+            Ok(()) => {
+                self.auth_check_request = Some((id, self.github_auth_epoch));
+                self.snapshot.github_auth_checking = true;
+            }
+            Err(error) => {
+                self.snapshot.github_auth_checking = false;
                 self.snapshot.error_message = Some(error.message);
             }
         }
@@ -126,10 +159,16 @@ impl GitziApp {
 
         match action {
             UiAction::StartGitHubBrowserLogin => {
+                self.github_auth_epoch = self.github_auth_epoch.saturating_add(1);
                 self.submit(GitOperation::StartGitHubBrowserLogin, 0);
             }
             UiAction::CheckGitHubAuth => {
-                self.submit(GitOperation::CheckGitHubAuth, 0);
+                if self.auth_check_request.is_some() {
+                    return;
+                }
+                self.github_auth_epoch = self.github_auth_epoch.saturating_add(1);
+                self.snapshot.error_message = None;
+                self.request_github_auth_check();
             }
             UiAction::OpenRepository(path) => {
                 self.generation = self.generation.saturating_add(1);
@@ -798,6 +837,59 @@ impl GitziApp {
 
     fn receive_responses(&mut self) {
         while let Some(response) = self.worker.try_recv() {
+            if self
+                .auth_check_request
+                .is_some_and(|(id, _)| id == response.id)
+            {
+                let (_, auth_epoch) = self
+                    .auth_check_request
+                    .take()
+                    .expect("auth check was checked above");
+                self.snapshot.github_auth_checking = false;
+                self.append_commands(response.commands);
+                if auth_epoch == self.github_auth_epoch && !self.github_login_process_active {
+                    match response.result {
+                        Ok(GitResult::GitHubAuthChecked { status }) => {
+                            self.snapshot.github_auth_status = status;
+                        }
+                        Err(error) if self.snapshot.error_message.is_none() => {
+                            self.snapshot.error_message = Some(error.message);
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            if self
+                .status_refresh_request
+                .as_ref()
+                .is_some_and(|(id, _)| *id == response.id)
+            {
+                let (_, requested_path) = self
+                    .status_refresh_request
+                    .take()
+                    .expect("status request was checked above");
+                self.snapshot.status_refreshing = false;
+                let is_current = response.generation == self.generation
+                    && self.snapshot.active_repo.as_ref() == Some(&requested_path);
+                if is_current {
+                    self.snapshot.status_checked_at = Some(SystemTime::now());
+                    match response.result {
+                        Ok(GitResult::RepositoryStatusRefreshed { path, status })
+                            if path == requested_path =>
+                        {
+                            self.snapshot.repository = Some(status);
+                        }
+                        Err(error) if self.snapshot.error_message.is_none() => {
+                            self.snapshot.error_message = Some(error.message);
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
             if let Ok(GitResult::GitHubLoginFinished { status }) = &response.result {
                 self.update_commands(response.commands);
                 self.github_login_process_active = false;
@@ -818,9 +910,6 @@ impl GitziApp {
             let is_current = pending
                 .as_ref()
                 .is_some_and(|request| request.generation == response.generation);
-            let auth_check_started_during_login = pending
-                .as_ref()
-                .is_some_and(|request| request.auth_check_started_during_login);
             let refresh_after_error = pending.and_then(|request| request.refresh_after_error);
             self.snapshot.busy = !self.pending.is_empty();
             self.append_commands(response.commands);
@@ -839,7 +928,7 @@ impl GitziApp {
                     self.snapshot.github_auth_status = GitHubAuthStatus::LoginStarted;
                 }
                 Ok(GitResult::GitHubAuthChecked { status }) => {
-                    if !self.github_login_process_active && !auth_check_started_during_login {
+                    if !self.github_login_process_active {
                         self.snapshot.github_auth_status = status;
                     }
                 }
@@ -858,6 +947,7 @@ impl GitziApp {
                     }
                     self.snapshot.active_repo = Some(path.clone());
                     self.snapshot.repository = Some(status);
+                    self.snapshot.status_checked_at = Some(SystemTime::now());
                     self.snapshot.file_diff = None;
                     settings::remember_repository(&path, &mut self.snapshot.recent_repositories);
                     self.submit_preserving_error(
@@ -1030,8 +1120,38 @@ impl GitziApp {
 
     fn clear_repository_view(&mut self) {
         self.snapshot.repository = None;
+        self.snapshot.status_refreshing = false;
+        self.snapshot.status_checked_at = None;
         self.snapshot.file_diff = None;
         self.clear_collaboration_state();
+    }
+
+    fn refresh_repository_status_when_due(&mut self) {
+        let Some(repository) = self.snapshot.active_repo.clone() else {
+            return;
+        };
+        if self.snapshot.busy
+            || self.status_refresh_request.is_some()
+            || self.snapshot.repository.is_none()
+            || self
+                .last_status_refresh_started
+                .is_some_and(|started| started.elapsed() < STATUS_REFRESH_INTERVAL)
+        {
+            return;
+        }
+
+        let id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let request = GitRequest {
+            id,
+            generation: self.generation,
+            operation: GitOperation::RefreshRepositoryStatus(repository.clone()),
+        };
+        self.last_status_refresh_started = Some(Instant::now());
+        if self.worker.submit(request).is_ok() {
+            self.status_refresh_request = Some((id, repository));
+            self.snapshot.status_refreshing = true;
+        }
     }
 
     fn append_commands(&mut self, commands: Vec<CommandEntry>) {
@@ -1069,8 +1189,19 @@ impl GitziApp {
     fn request_pending_repaint(&self, ctx: &egui::Context) {
         if self.snapshot.busy {
             ctx.request_repaint_after(Duration::from_millis(100));
+        } else if self.snapshot.github_auth_checking {
+            ctx.request_repaint_after(Duration::from_millis(200));
         } else if self.github_login_process_active {
             ctx.request_repaint_after(Duration::from_secs(1));
+        } else if self.snapshot.status_refreshing {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else if self.snapshot.repository.is_some() {
+            let wait = self
+                .last_status_refresh_started
+                .map_or(STATUS_REFRESH_INTERVAL, |started| {
+                    STATUS_REFRESH_INTERVAL.saturating_sub(started.elapsed())
+                });
+            ctx.request_repaint_after(wait.max(Duration::from_millis(100)));
         }
     }
 }
@@ -1090,6 +1221,7 @@ fn is_unmerged(file: &FileStatus) -> bool {
 impl eframe::App for GitziApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_responses();
+        self.refresh_repository_status_when_due();
         self.request_pending_repaint(ctx);
     }
 

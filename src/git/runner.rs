@@ -15,6 +15,7 @@ use std::{
 };
 
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+const GITHUB_AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(8);
 static LOG_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +29,7 @@ pub enum GitOperation {
         visibility: GitHubRepositoryVisibility,
     },
     InspectRepository(PathBuf),
+    RefreshRepositoryStatus(PathBuf),
     InitializeRepository {
         path: PathBuf,
     },
@@ -172,6 +174,10 @@ pub enum GitResult {
         path: PathBuf,
         status: RepositoryStatus,
     },
+    RepositoryStatusRefreshed {
+        path: PathBuf,
+        status: RepositoryStatus,
+    },
     RepositoryInitialized {
         path: PathBuf,
     },
@@ -288,6 +294,44 @@ pub(crate) struct LoginWatcher {
     shutdown: std::sync::Arc<AtomicBool>,
 }
 
+pub(crate) struct AuthStatusWatcher {
+    request_id: u64,
+    generation: u64,
+    child: std::process::Child,
+    command: CommandEntry,
+    shutdown: std::sync::Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+pub(crate) enum ProcessWatcher {
+    Login(LoginWatcher),
+    AuthStatus(AuthStatusWatcher),
+}
+
+pub(crate) enum RequestExecution {
+    Immediate(GitResponse),
+    Background {
+        initial: Option<GitResponse>,
+        watcher: Box<ProcessWatcher>,
+    },
+}
+
+impl ProcessWatcher {
+    pub(crate) fn wait_for_completion(self) -> GitResponse {
+        match self {
+            Self::Login(watcher) => watcher.wait_for_completion(),
+            Self::AuthStatus(watcher) => watcher.wait_for_completion(),
+        }
+    }
+
+    pub(crate) fn monitor_start_failed(self, error: std::io::Error) -> GitResponse {
+        match self {
+            Self::Login(watcher) => watcher.monitor_start_failed(error),
+            Self::AuthStatus(watcher) => watcher.monitor_start_failed(error),
+        }
+    }
+}
+
 impl LoginWatcher {
     pub(crate) fn wait_for_completion(mut self) -> GitResponse {
         loop {
@@ -330,7 +374,7 @@ impl LoginWatcher {
         error: Option<String>,
     ) -> GitResponse {
         let succeeded = error.is_none() && status.is_some_and(|status| status.success());
-        self.command.exit_code = status.and_then(|status| status.code());
+        self.command.exit_code = status.as_ref().and_then(std::process::ExitStatus::code);
         self.command.status = if succeeded {
             CommandStatus::Succeeded
         } else {
@@ -360,14 +404,114 @@ impl Drop for LoginWatcher {
     }
 }
 
-pub(crate) fn handle_request_with_monitor(
+impl AuthStatusWatcher {
+    pub(crate) fn wait_for_completion(mut self) -> GitResponse {
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                let _ = self.child.kill();
+                let status = self.child.wait().ok();
+                return self.finished_response(
+                    status,
+                    Some("La consulta de sesión se canceló al cerrar Gitzi.".into()),
+                );
+            }
+            match self.child.try_wait() {
+                Ok(Some(status)) => return self.finished_response(Some(status), None),
+                Ok(None) if Instant::now() >= self.deadline => {
+                    let _ = self.child.kill();
+                    let status = self.child.wait().ok();
+                    return self.finished_response(
+                        status,
+                        Some("`gh auth status` superó el límite de espera de 8 segundos; inténtalo de nuevo.".into()),
+                    );
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(40)),
+                Err(error) => {
+                    let _ = self.child.kill();
+                    let status = self.child.wait().ok();
+                    return self.finished_response(
+                        status,
+                        Some(format!(
+                            "No se pudo esperar la comprobación de sesión de GitHub CLI: {error}"
+                        )),
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn monitor_start_failed(mut self, error: std::io::Error) -> GitResponse {
+        let _ = self.child.kill();
+        let status = self.child.wait().ok();
+        self.finished_response(
+            status,
+            Some(format!(
+                "No se pudo iniciar el monitor de `gh auth status`: {error}"
+            )),
+        )
+    }
+
+    fn finished_response(
+        &mut self,
+        status: Option<std::process::ExitStatus>,
+        error: Option<String>,
+    ) -> GitResponse {
+        self.command.exit_code = status.and_then(|status| status.code());
+        self.command.duration = self.command.started_at.elapsed().unwrap_or_default();
+        let result = if let Some(error) = error {
+            self.command.status = CommandStatus::Failed;
+            self.command.stderr = redact_text(&error);
+            Err(GitError { message: error })
+        } else if let Some(status) = status.as_ref() {
+            self.command.status = if status.success() {
+                CommandStatus::Succeeded
+            } else {
+                CommandStatus::Failed
+            };
+            Ok(GitResult::GitHubAuthChecked {
+                status: github_auth_status_for_exit(status.success()),
+            })
+        } else {
+            self.command.status = CommandStatus::Failed;
+            let message = "No se pudo determinar el resultado de `gh auth status`.".to_owned();
+            self.command.stderr = redact_text(&message);
+            Err(GitError { message })
+        };
+        GitResponse {
+            id: self.request_id,
+            generation: self.generation,
+            result,
+            commands: vec![self.command.clone()],
+        }
+    }
+}
+
+impl Drop for AuthStatusWatcher {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
+pub(crate) fn execute_request(
     request: GitRequest,
     shutdown: std::sync::Arc<AtomicBool>,
-) -> (GitResponse, Option<LoginWatcher>) {
-    if matches!(&request.operation, GitOperation::StartGitHubBrowserLogin) {
-        start_github_login(request, shutdown)
-    } else {
-        (handle_request(request), None)
+) -> RequestExecution {
+    match &request.operation {
+        GitOperation::StartGitHubBrowserLogin => {
+            let (response, watcher) = start_github_login(request, shutdown);
+            match watcher {
+                Some(watcher) => RequestExecution::Background {
+                    initial: Some(response),
+                    watcher: Box::new(ProcessWatcher::Login(watcher)),
+                },
+                None => RequestExecution::Immediate(response),
+            }
+        }
+        GitOperation::CheckGitHubAuth => start_github_auth_check(request, shutdown),
+        _ => RequestExecution::Immediate(handle_request(request)),
     }
 }
 
@@ -376,7 +520,9 @@ pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
         GitOperation::StartGitHubBrowserLogin => unreachable!(
             "GitHub login must use handle_request_with_monitor so its process is watched"
         ),
-        GitOperation::CheckGitHubAuth => check_github_auth(),
+        GitOperation::CheckGitHubAuth => unreachable!(
+            "GitHub auth status must use execute_request so it cannot block the Git worker"
+        ),
         GitOperation::CreateGitHubRepository {
             repository,
             name,
@@ -438,6 +584,7 @@ pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
             }
             (result, commands)
         }
+        GitOperation::RefreshRepositoryStatus(path) => refresh_repository_status(path),
         GitOperation::InitializeRepository { path } => {
             let args = vec!["init".into(), "--".into(), path.as_os_str().to_owned()];
             let (entry, output) = run_git_from_current_dir(&args);
@@ -617,6 +764,50 @@ pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
         result,
         commands,
     }
+}
+
+fn refresh_repository_status(path: PathBuf) -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
+    let args = [
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=all",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    let (entry, output) = run_git(&path, &args);
+    let mut result = match output {
+        Ok(output) if output.stdout.truncated => Err(GitError {
+            message: "La salida de git status superó el límite de captura de 1 MiB; el estado está incompleto.".into(),
+        }),
+        Ok(output) if output.status.success() => match parse_status_output(&output.stdout) {
+            Ok(status) => Ok(GitResult::RepositoryStatusRefreshed {
+                path: path.clone(),
+                status,
+            }),
+            Err(error) => Err(error),
+        },
+        Ok(output) => Err(command_error(
+            "No se pudo consultar el repositorio; comprueba que la ruta sea válida y que Git tenga acceso",
+            &entry,
+            &output.stderr,
+        )),
+        Err(error) => Err(GitError {
+            message: format!(
+                "No se pudo ejecutar Git para consultar {}. Comprueba que Git esté instalado y que la ruta sea accesible. {error}",
+                path.display()
+            ),
+        }),
+    };
+    let mut commands = vec![entry];
+    if let Ok(GitResult::RepositoryStatusRefreshed { status, .. }) = &mut result {
+        status.last_fetch_at = fetch_timestamp(&path, &mut commands);
+        status.integration = detect_integration(&path, &mut commands);
+    }
+    (result, commands)
 }
 
 fn handle_collaboration(
@@ -2179,22 +2370,66 @@ fn successful_mutation(
     }
 }
 
-fn check_github_auth() -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
+fn start_github_auth_check(
+    request: GitRequest,
+    shutdown: std::sync::Arc<AtomicBool>,
+) -> RequestExecution {
     let args = github_auth_status_args();
-    let (entry, output) = run_gh(&args);
-    let status = match &output {
-        Ok(output) if output.stdout.truncated || output.stderr.truncated => Err(GitError {
-            message: "La salida de gh auth status superó el límite de captura de 1 MiB; vuelve a comprobar la sesión.".into(),
+    let executable = std::ffi::OsStr::new("gh");
+    let mut command = Command::new(executable);
+    configure_background_command(&mut command, &args);
+    start_github_auth_check_with_command(
+        request,
+        shutdown,
+        command,
+        executable,
+        &args,
+        GITHUB_AUTH_STATUS_TIMEOUT,
+    )
+}
+
+fn start_github_auth_check_with_command(
+    request: GitRequest,
+    shutdown: std::sync::Arc<AtomicBool>,
+    command: Command,
+    executable: &std::ffi::OsStr,
+    args: &[OsString],
+    timeout: Duration,
+) -> RequestExecution {
+    match spawn_background_command(
+        command,
+        executable,
+        args,
+        "No se pudo iniciar GitHub CLI para comprobar la sesión. Comprueba que `gh` esté instalado y en PATH.",
+    ) {
+        Ok((command, child)) => RequestExecution::Background {
+            initial: None,
+            watcher: Box::new(ProcessWatcher::AuthStatus(AuthStatusWatcher {
+                request_id: request.id,
+                generation: request.generation,
+                child,
+                command,
+                shutdown,
+                deadline: Instant::now() + timeout,
+            })),
+        },
+        Err((command, message)) if is_program_not_found(&message) => {
+            RequestExecution::Immediate(GitResponse {
+                id: request.id,
+                generation: request.generation,
+                result: Ok(GitResult::GitHubAuthChecked {
+                    status: GitHubAuthStatus::CliUnavailable,
+                }),
+                commands: vec![*command],
+            })
+        }
+        Err((command, message)) => RequestExecution::Immediate(GitResponse {
+            id: request.id,
+            generation: request.generation,
+            result: Err(GitError { message }),
+            commands: vec![*command],
         }),
-        Ok(output) => Ok(github_auth_status_for_exit(output.status.success())),
-        // `gh auth status` returns a non-zero code when there is no active login.
-        Err(error) if is_program_not_found(error) => Ok(GitHubAuthStatus::CliUnavailable),
-        Err(error) => Err(GitError {
-            message: format!("No se pudo consultar GitHub CLI. Comprueba que `gh` esté instalado y en PATH. {error}"),
-        }),
-    };
-    let result = status.map(|status| GitResult::GitHubAuthChecked { status });
-    (result, vec![entry])
+    }
 }
 
 fn create_github_repository(
@@ -2615,7 +2850,12 @@ fn spawn_background_login(
 ) -> Result<(CommandEntry, std::process::Child), (Box<CommandEntry>, String)> {
     let mut command = Command::new(executable);
     configure_background_command(&mut command, args);
-    spawn_background_command(command, executable, args)
+    spawn_background_command(
+        command,
+        executable,
+        args,
+        "No se pudo iniciar GitHub CLI para abrir el flujo de autorización web. Comprueba que `gh` siga instalado y que el navegador predeterminado esté disponible.",
+    )
 }
 
 fn configure_background_command(command: &mut Command, args: &[OsString]) {
@@ -2635,6 +2875,7 @@ fn spawn_background_command(
     mut command: Command,
     executable: &std::ffi::OsStr,
     args: &[OsString],
+    failure_message: &str,
 ) -> Result<(CommandEntry, std::process::Child), (Box<CommandEntry>, String)> {
     let started_at = SystemTime::now();
     let display = command_display(&executable.to_string_lossy(), args);
@@ -2654,9 +2895,7 @@ fn spawn_background_command(
             child,
         )),
         Err(error) => {
-            let message = format!(
-                "No se pudo iniciar GitHub CLI para abrir el flujo de autorización web. Comprueba que `gh` siga instalado y que el navegador predeterminado esté disponible. {error}"
-            );
+            let message = format!("{failure_message} {error}");
             let entry = CommandEntry {
                 id: LOG_ID.fetch_add(1, Ordering::Relaxed),
                 command_display: redact_text(&display),
@@ -3178,6 +3417,103 @@ mod tests {
     }
 
     #[test]
+    fn github_auth_status_child_waits_for_timeout_when_requested() {
+        if std::env::var_os("GITZI_AUTH_STATUS_CHILD_WAIT").is_some() {
+            thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    fn waiting_test_child(variable: &str) -> (Command, Vec<OsString>, std::path::PathBuf) {
+        let executable = std::env::current_exe().unwrap();
+        let args = [
+            OsString::from("--exact"),
+            OsString::from(
+                "git::runner::tests::github_auth_status_child_waits_for_timeout_when_requested",
+            ),
+        ];
+        let mut command = Command::new(&executable);
+        configure_background_command(&mut command, &args);
+        command.env(variable, "1");
+        (command, args.to_vec(), executable)
+    }
+
+    #[test]
+    fn github_auth_status_watcher_times_out_and_preserves_request_identity() {
+        let (command, args, executable) = waiting_test_child("GITZI_AUTH_STATUS_CHILD_WAIT");
+        let request = GitRequest {
+            id: 74,
+            generation: 8,
+            operation: GitOperation::CheckGitHubAuth,
+        };
+        let execution = start_github_auth_check_with_command(
+            request,
+            std::sync::Arc::new(AtomicBool::new(false)),
+            command,
+            executable.as_os_str(),
+            &args,
+            Duration::from_millis(120),
+        );
+        let RequestExecution::Background {
+            initial: None,
+            watcher,
+        } = execution
+        else {
+            panic!("a spawned auth check should be monitored in the background");
+        };
+        let ProcessWatcher::AuthStatus(watcher) = *watcher else {
+            panic!("the auth check should use the auth status watcher");
+        };
+        let command_id = watcher.command.id;
+        assert_eq!(watcher.command.status, CommandStatus::Running);
+
+        let started_at = Instant::now();
+        let response = watcher.wait_for_completion();
+        assert!(started_at.elapsed() < Duration::from_secs(5));
+        assert_eq!((response.id, response.generation), (74, 8));
+        assert!(response.result.is_err());
+        assert_eq!(response.commands[0].id, command_id);
+        assert_eq!(response.commands[0].status, CommandStatus::Failed);
+        assert!(response.commands[0].stderr.contains("límite de espera"));
+    }
+
+    #[test]
+    fn auth_check_dispatch_returns_before_child_finishes() {
+        let (command, args, executable) = waiting_test_child("GITZI_AUTH_STATUS_CHILD_WAIT");
+        let execution = start_github_auth_check_with_command(
+            GitRequest {
+                id: 75,
+                generation: 9,
+                operation: GitOperation::CheckGitHubAuth,
+            },
+            std::sync::Arc::new(AtomicBool::new(false)),
+            command,
+            executable.as_os_str(),
+            &args,
+            Duration::from_secs(8),
+        );
+        let RequestExecution::Background {
+            initial: None,
+            watcher,
+        } = execution
+        else {
+            panic!("auth check dispatch should return a background watcher immediately");
+        };
+        let ProcessWatcher::AuthStatus(watcher) = *watcher else {
+            panic!("the auth check should use the auth status watcher");
+        };
+        assert_eq!(watcher.command.status, CommandStatus::Running);
+
+        // This synchronous local operation can proceed while the CLI child is still running.
+        let local = handle_request(GitRequest {
+            id: 76,
+            generation: 9,
+            operation: GitOperation::DetectGit,
+        });
+        assert!(matches!(local.result, Ok(GitResult::GitDetected { .. })));
+        drop(watcher);
+    }
+
+    #[test]
     fn dropping_login_watcher_kills_and_waits_for_its_child() {
         let executable = std::env::current_exe().unwrap();
         let args = [
@@ -3187,8 +3523,13 @@ mod tests {
         let mut command = Command::new(&executable);
         configure_background_command(&mut command, &args);
         command.env("GITZI_LOGIN_CHILD_WAIT", "1");
-        let (entry, child) =
-            spawn_background_command(command, executable.as_os_str(), &args).unwrap();
+        let (entry, child) = spawn_background_command(
+            command,
+            executable.as_os_str(),
+            &args,
+            "No se pudo iniciar el proceso de prueba.",
+        )
+        .unwrap();
         assert_eq!(entry.status, CommandStatus::Running);
         let watcher = LoginWatcher {
             request_id: 73,

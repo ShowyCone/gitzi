@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Entrega actual: MVP Gitzi — Entregas 1–5 y actualizaciones T6–T8 implementadas; T8 verificada en Windows y revisada independientemente sin defectos confirmados.
+Entrega actual: MVP Gitzi — Entregas 1–5 y actualizaciones T6–T9 implementadas; T9 verificada en Windows y revisada independientemente sin bloqueantes.
 
 Estado verificado al inicio: el directorio contenía únicamente `ARQUITECTURA_Y_VISION.md`; no era un repositorio Git y no había `AGENTS.md` en los directorios del proyecto/ancestros comprobados. La toolchain Rust 1.99.0 estaba instalada en `C:\Users\alexr\.cargo\bin`, pero no estaba en el PATH del proceso. Se inicializó el repositorio local en `main` para conservar los cambios en commits ordenados.
 
@@ -49,3 +49,11 @@ Actualización T8 implementada: ventana fija 980×660, botones con objetivos de 
 Verificación integrada T8 en Windows con Rust 1.99.0: `cargo fmt --all -- --check`, `git diff --check`, `cargo clippy --locked --all-targets -- --deny warnings`, `cargo test --locked` (38/38) y `cargo build --release --locked` pasan. Las pruebas cubren resultados de watcher exitosos y fallidos y que descartar el watcher mata y recolecta el proceso hijo; no usan una cuenta real ni la red.
 
 Límites T8: no se inspeccionó visualmente la ventana en esta sesión ni se verificaron Linux, GitHub Actions remoto, login con cuenta real o publicación remota. El navegador del sistema sigue siendo necesario para aprobar el dispositivo; Gitzi ya no abre una consola. El transcript agrega los resultados al recibir respuestas, sin streaming de stdout/stderr de las operaciones durante su ejecución. `gh` no se configura como credential helper global: Git conserva el helper/agente SSH del usuario, y autenticarse en `gh` no garantiza por sí solo que Git HTTPS use ese token. La revisión independiente final no encontró bloqueos.
+
+Actualización T9 cerrada: la ventana organiza sus funciones en **Cambios**, **Sincronizar**, **Historial**, **Ramas**, **Integrar** y **Repositorio**. El resumen fijo identifica nombre/ruta del repo, rama, cambios sin commit y commits ahead/behind cuando existe upstream. El estado se refresca cada 2 s con `git status --porcelain=v2 --branch -z`, `--no-optional-locks` y referencias locales conocidas; no hace fetch ni usa la red. Una sola actualización queda en vuelo y las respuestas obsoletas de otra ruta/generación se descartan. El botón **Inicializar** se desactiva cuando la ruta o alguno de sus ancestros ya pertenece a un repo Git, incluyendo `.git` como archivo o directorio.
+
+Gitzi comprueba `gh auth status` al iniciar en un watcher aislado, sin bloquear operaciones locales ni capturar salidas que pudieran contener datos sensibles; la consulta se cancela si excede 8 s o se cierra la app. La autenticación real sigue siendo opcional para el trabajo local.
+
+Verificación integrada T9 en Windows con Rust 1.99.0: `cargo fmt --all -- --check`, `git diff --check`, `cargo clippy --locked --all-targets -- --deny warnings`, `cargo test --locked` (42/42) y `cargo build --release --locked` pasan. La revisión independiente confirmó la coherencia de las seis pestañas, el estado persistente, el polling mientras se ejecuta el login y el watcher de auth con timeout. También se ajustó la recolección de monitores de procesos terminados.
+
+Límites T9: no se inspeccionó la GUI visualmente, no se hizo login real ni operación remota, y Linux/Actions remoto siguen pendientes. El ahead/behind depende de refs/upstream ya conocidos; el refresco automático es local y no sustituye Fetch. No se añadió ni cambió `origin`.
