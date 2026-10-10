@@ -1,6 +1,6 @@
 # Contratos compartidos
 
-Estado: contrato compartido para Entregas 1 y 2. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/domain.rs`, `src/app.rs`, `src/settings.rs` y este documento pertenecen al orquestador.
+Estado: contratos compartidos para Entregas 1, 2 y 3. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/domain.rs`, `src/app.rs`, `src/settings.rs` y este documento pertenecen al orquestador.
 
 ## Límites
 
@@ -85,3 +85,39 @@ Se fija eframe `0.36.2` tras verificar la documentación oficial. Se desactivan 
 - Valida acciones contra el repositorio y la lista de archivos vigentes. El estado de carga no bloquea egui.
 - Tras stage/unstage/commit elimina el diff obsoleto y refresca el estado. Tras init/clone abre el destino y realiza la inspección inicial.
 - Commit nunca prepara por su cuenta archivos no preparados. El estado usa `--no-optional-locks`; diffs y mutaciones constan como invocaciones reales en el registro.
+
+## Entrega 3: colaboración
+
+### Dominio y acciones (`src/domain.rs`, propiedad del orquestador)
+
+- `RepositoryStatus.last_fetch_at: Option<SystemTime>` es la fecha local de modificación de `FETCH_HEAD`; no se calcula una consulta remota ni se inventa una fecha si el archivo no existe.
+- `BranchInfo { name, kind, current, upstream }`, con `BranchKind::{Local, Remote}`, y `RemoteInfo { name }` representan las ramas y remotos que Git conoce localmente.
+- `CommitSummary { id, author, authored_at, subject }`, `CommitFileChange { status, path }` y `CommitDetail { summary, message, changed_files }` representan una página de historial y el detalle cargado bajo demanda.
+- `RefComparison { base_ref, target_ref, commits_ahead, commits_behind, diff, truncated }` compara dos refs: ahead cuenta commits alcanzables desde target que no están en base; behind cuenta commits alcanzables desde base que no están en target.
+- `AppSnapshot` añade `branches`, `remotes`, `history`, `history_has_more`, `commit_detail` y `ref_comparison`. La app invalida datos que pertenecen a una selección/repo anterior.
+- `UiAction` añade `Fetch`, `Pull`, `Push`, `PublishBranch(String)`, `SetUpstream { local_branch, remote_branch }`, `CreateBranch(String)`, `SwitchBranch(String)`, `LoadMoreHistory`, `LoadCommitDetail(String)` y `CompareReferences { base_ref, target_ref }`.
+
+### Motor Git (`src/git/**`, propiedad T3-GIT)
+
+- Añade `GitOperation::{ListBranches(PathBuf), CreateBranch { repository, name }, SwitchBranch { repository, name }, SetUpstream { repository, local_branch, remote_branch }, Fetch(PathBuf), PullFastForward(PathBuf), Push { repository, local_branch, upstream }, PublishBranch { repository, remote, local_branch }, LoadHistory { repository, offset, limit }, LoadCommitDetail { repository, commit_id }, CompareReferences { repository, base_ref, target_ref }}`.
+- Añade resultados homónimos: `BranchesListed { repository, branches, remotes }`, `BranchCreated { repository }`, `BranchSwitched { repository }`, `UpstreamSet { repository }`, `Fetched { repository }`, `Pulled { repository }`, `Pushed { repository }`, `BranchPublished { repository }`, `HistoryLoaded { repository, offset, commits, has_more }`, `CommitLoaded { repository, detail }` y `ReferencesCompared { repository, comparison }`.
+- El mínimo de Git documentado para esta entrega es 2.23 por el uso de `git switch`; la interfaz muestra el error real si Git no soporta un comando.
+- `ListBranches` consulta referencias y remotos locales con formatos estructurados. La app agenda esa consulta tras abrir repo o cambiar rama. Historial se pagina con máximo 50 registros por página; la app solicita 30 y `has_more` se calcula leyendo como máximo un registro adicional.
+- Crear rama crea y cambia a la nueva rama desde HEAD; cambiar rama usa la rama existente y deja que Git rechace cambios incompatibles. `SetUpstream` solo asocia una rama local con una referencia remota que ya existe. `PublishBranch` publica la rama actual en el remoto elegido y establece upstream en la misma operación.
+- `Fetch` consulta todos los remotos configurados. `PullFastForward` ejecuta pull con `--ff-only`, política que la interfaz identifica y el motor aplica explícitamente sin cambiar la configuración global de Git. `Push` recibe la rama local actual y upstream observados, valida su OID y lo envía al destino remoto upstream mediante un refspec explícito; no hereda refspecs múltiples de `push.default` ni `remote.<name>.push`. Publicar también usa el OID validado de la rama actual y, solo si el push termina con éxito, configura `branch.<local>.remote` y `branch.<local>.merge` con `git config --local`. Push y publicación desactivan `remote.<name>.mirror` solo para la invocación y usan `--no-follow-tags`, sin alterar preferencias persistentes ni ampliar refs. Ninguna operación usa `--force`, `--force-with-lease` ni reintenta un push rechazado. Si no hay upstream, la app exige publicar la rama, configurar un upstream existente o cancelar la acción. Publicar y hacer push requieren una rama local actual con al menos un commit.
+- En Fetch/Pull/Push/Publicar se conserva la configuración de credenciales y SSH existente. Solo para estas invocaciones `GIT_TERMINAL_PROMPT=0` evita esperar por entrada en una consola oculta; los helpers configurados siguen habilitados y sus fallos o cancelaciones se devuelven como `GitError` con la salida real redactada. No se solicitan ni guardan credenciales.
+- La fecha de fetch se obtiene del mtime local de la ruta que `git rev-parse --git-path FETCH_HEAD` devuelve, si existe, después de Fetch/Pull y al inspeccionar el repo. No representa un sondeo remoto.
+- Historial usa salida delimitada por NUL y referencias commit; detalles cargan mensaje y lista de archivos bajo demanda. Comparación valida cada referencia como commit antes de usar sus OID y limita el diff a 1 MiB. Las referencias inválidas son errores operativos, no argumentos de opciones.
+- Todos los resultados mantienen `GitResponse { id, generation, ... }`, el worker serial existente, argv separados, cwd explícito, registro real y límites de salida. Mutaciones solo ocurren por acción directa y se prueban en repositorios temporales con remoto bare temporal.
+
+### Interfaz (`src/ui/**`, propiedad T3-UI)
+
+- Presenta ramas locales/remotas, creación/cambio de rama, upstream, fetch, pull FF-only y push/publicación explícitos; las acciones incompatibles se deshabilitan con el worker ocupado o sin los datos requeridos.
+- Muestra ahead/behind y `last_fetch_at` como conocimiento local, sin insinuar frescura remota. Presenta historia paginada, detalle de commit y comparación de dos ramas/referencias disponibles.
+- Errores/cancelación de autenticación se muestran desde el resultado real del motor. La UI no crea comandos, elige credenciales ni convierte un push rechazado en otra acción.
+
+### Integración (`src/app.rs`, propiedad del orquestador)
+
+- Valida acciones usando repo, rama local actual y listas vigentes; publicar/push exigen una rama local actual con commit. Un cambio de repo invalida listas, historial, detalle y comparación.
+- Tras crear/cambiar rama, publicar, configurar upstream, fetch o pull, refresca estado de repo y referencias locales. Tras push refresca contadores y el estado de la rama. La paginación añade resultados solo para el repositorio y offset actuales. La UI solo presenta una comparación mientras coincide con las dos referencias seleccionadas.
+- El registro conserva argv y salidas reales, aplica la redacción existente y muestra los errores del helper de credenciales cancelado/fallido. No se persiste salida ni secreto.

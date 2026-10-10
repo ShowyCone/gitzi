@@ -250,7 +250,7 @@ Los presupuestos numéricos de rendimiento se fijarán después del prototipo. N
 ## 10. Integridad y decisiones de Git
 
 - Preparar, hacer commit y hacer push son acciones separadas.
-- Pull debe tener una política visible y persistida. Propuesta inicial: avance rápido únicamente; ante divergencia, ofrecer merge o rebase explícitos, sin cambiar la política global de Git.
+- En Entrega 3, Pull usa avance rápido únicamente y la interfaz muestra esta política; ante divergencia, la operación falla sin iniciar integración. En Entrega 4, persistir la política escogida y ofrecer merge o rebase explícitos, sin cambiar la política global de Git.
 - Nunca realizar push forzado automáticamente. Si se añade más adelante, tendrá una acción diferenciada y condiciones explícitas.
 - Nunca descartar, resetear, eliminar ramas o borrar stashes automáticamente para superar un error.
 - Mostrar confirmaciones concretas para acciones que puedan perder trabajo, con archivos o referencias afectados.
