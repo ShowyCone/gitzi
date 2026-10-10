@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Entrega actual: 2 — cambios y commits.
+Entrega actual: 4 — integración y recuperación (siguiente; Entrega 3 cerrada).
 
 Estado verificado al inicio: el directorio contenía únicamente `ARQUITECTURA_Y_VISION.md`; no era un repositorio Git y no había `AGENTS.md` en los directorios del proyecto/ancestros comprobados. La toolchain Rust 1.99.0 estaba instalada en `C:\Users\alexr\.cargo\bin`, pero no estaba en el PATH del proceso. Se inicializó el repositorio local en `main` para conservar los cambios en commits ordenados.
 
@@ -16,4 +16,8 @@ Entrega 2 cerrada funcionalmente: init/clone, diffs por archivo y área, stage/u
 
 Verificación integrada de Entrega 2 en Windows con Rust 1.99.0 y Git real: `cargo fmt --all -- --check` pasó; `cargo test` pasó 17/17; `cargo clippy --all-targets -- --deny warnings` pasó; `cargo run` compiló e inició `target/debug/gitzi.exe`. Las pruebas usan repositorios temporales e incluyen init/clone, parser porcelain v2 con HEAD inicial y conflictos, diff por área y binario untracked, staging, commit solo del índice, preservación de cambios no preparados y unstage de un renombre. La revisión independiente confirmó además paths literales con guion/corchetes y unstage de un borrado. Una ejecución de pruebas dentro del sandbox no pudo lanzar el helper MSYS de clone (`NtCreateDirectoryObject`, `0xC0000022`); la corrida autorizada en el host pasó incluyendo clone.
 
-Limitaciones pendientes: no se pudo inspeccionar visualmente la ventana ni probar teclado/foco porque las APIs de aplicaciones nativas estaban deshabilitadas; Linux no se probó. Arranque en frío, Working Set y CPU en reposo siguen sin medición según el método arriba indicado. La próxima entrega es Entrega 3 — colaboración; no está implementada aún.
+Entrega 3 cerrada funcionalmente: Fetch, Pull FF-only, Push y publicación segura; gestión de ramas y upstream; historial paginado, detalle de commits y comparación de refs. Push/Publish envían el OID validado de la rama mediante refspec explícito; los rechazos no activan fuerza. Publicar fija el upstream solo después de que el push tenga éxito. Los contadores ahead/behind y la fecha de fetch se basan en refs locales conocidas. Contrato: `2c3fe67`; implementación: `2ad2953`.
+
+Verificación integrada de Entrega 3 en Windows con Rust 1.99.0 y Git real: `cargo fmt --all -- --check`, `cargo test` (18/18), `cargo clippy --all-targets -- --deny warnings` y `cargo build` pasaron. La prueba de colaboración usa dos clones y un remoto bare temporal; verifica fetch, fast-forward, historial, comparación, Push/Publish con refspec OID, preservación de refs ante rechazo y upstream explícito. La revisión independiente no encontró defectos pendientes que bloqueen el cierre.
+
+Pendientes: no se pudo inspeccionar visualmente la ventana ni probar teclado/foco porque las APIs nativas no están disponibles; no se probó Linux ni se midieron arranque en frío, Working Set o CPU en reposo. La autenticación se validó mediante configuración y Git local, sin una cuenta de proveedor real. Entrega 3 ofrece Pull FF-only fijo y visible; persistir una selección de política y ofrecer Merge/Rebase queda para Entrega 4. Siguiente entrega: integración y recuperación; no iniciada.

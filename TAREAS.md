@@ -17,3 +17,14 @@
 | T2-GIT | Agente de motor | Init/clone, diff por archivo/área, stage/unstage y commit | `src/git/**` | Contrato T2 en `CONTRATOS.md`; dominio T2 en `src/domain.rs` | Argumentos separados, cwd explícito y pathspec literal; diffs limitados con estado binario/truncado; HEAD inicial/conflictos; registro real; pruebas con repos temporales | aceptada |
 | T2-UI | Agente de interfaz | Flujo revisar → preparar → commit e init/clone | `src/ui/**` | Contrato T2 en `CONTRATOS.md`; snapshot y acciones T2 | Español; diff staged/unstaged separado e identidad repo/path/área; controles funcionales; binarios, truncamiento, HEAD inicial/conflicto; commit preserva mensaje exacto | aceptada |
 | T2-VERIFY | Agente verificador | Revisión independiente de Entrega 2 integrada | Sin cambios de producción | Integración T2-APP/T2-GIT/T2-UI | 17 pruebas pasan en host autorizado; revisión Git temporal de paths literales, borrado, diff untracked; limitación del sandbox, visual y Linux documentada; sin defectos funcionales confirmados | aceptada |
+
+## Entrega 3 — colaboración
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T3-APP | Orquestador | Integración de acciones, datos compartidos, actualización de estado y documentos | `src/domain.rs`, `src/app.rs`, `src/settings.rs`, `README.md`, docs raíz | Contrato T3 definido en `CONTRATOS.md` | Flujo integrado para sincronización segura, ramas, upstream, historial paginado, detalle y comparación; respuestas obsoletas ignoradas | aceptada |
+| T3-GIT | Agente de motor | Operaciones remotas, ramas, upstream, historial y comparación | `src/git/**` | Tipos y comandos exactos definidos en `CONTRATOS.md`; dominio T3 ya disponible | Git real con bare remoto temporal; Push/Publish usan OID validado y refspec explícito; publicación configura upstream tras éxito; auth conserva configuración; ningún push forzado; salidas acotadas | aceptada |
+| T3-UI | Agente de interfaz | Controles de colaboración e historia en español | `src/ui/**` | Snapshot/acciones T3 en `src/domain.rs` y `CONTRATOS.md` | Operaciones solicitadas disponibles con estados vacíos/carga/error; upstream ausente explícito; historial, detalle y comparación; acciones limitadas a refs actuales | aceptada |
+| T3-VERIFY | Agente verificador | Revisión independiente del flujo integrado | Sin cambios de producción | Integración T3-APP/T3-GIT/T3-UI coherente | 18 pruebas pasan con Git real; dos clones intercambian cambios con remoto bare; push rechazado nunca fuerza; revisión de ramas, upstream, paginación y comparación; limitaciones documentadas | aceptada |
+
+Pendiente arquitectónico para Entrega 4: la Entrega 3 ofrece Pull FF-only visible y fijo. La preferencia persistida de política y las opciones explícitas de Merge/Rebase aún no están implementadas.
