@@ -4,10 +4,10 @@ Gitzi es un cliente de escritorio visual para trabajar con repositorios Git. Per
 
 ## Requisitos
 
-- Git 2.23 o posterior, disponible en `PATH` (la aplicación usa `git switch`).
-- Rust 1.95 o posterior con Cargo. eframe 0.36.2 requiere Rust 1.95.
-- Identidad de autor/committer configurada en Git para crear commits.
-- En Linux, las bibliotecas de desarrollo requeridas por eframe para X11/Wayland, OpenGL y XKB. Linux sigue pendiente de validación en un host correspondiente.
+- Para ejecutar un paquete: Git 2.23 o posterior, disponible en `PATH` (Gitzi usa `git switch`), y una sesión gráfica de escritorio.
+- Para compilar desde el código: Rust 1.99.0 con Cargo. El `Cargo.lock` fija las dependencias.
+- En Linux, el sistema debe proporcionar las bibliotecas de ejecución de su sesión gráfica (X11 o Wayland) y OpenGL. La CI instala las bibliotecas de desarrollo para compilar, pero estas no se incluyen en el paquete.
+- Para crear commits, configura nombre y correo de autor/committer en Git.
 
 ## Ejecutar
 
@@ -36,4 +36,27 @@ cargo test
 cargo run
 ```
 
-La Entrega 4 se verificó en Windows con Rust 1.99.0 y Git real: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- --deny warnings` y 27 pruebas pasan. Los casos nuevos usan repositorios temporales y comprueban varios stashes/OID, merge y rebase con conflictos, continuación/aborto, revert, descarte de cambios preparados y sin preparar, renombres y rutas Unicode. No se validó una cuenta de proveedor real ni se pudo inspeccionar la ventana o probar teclado/foco porque las APIs de aplicaciones nativas no están disponibles. Linux y las mediciones de arranque, memoria y CPU siguen pendientes.
+Entrega 4 se verificó localmente en Windows con Rust 1.99.0 y Git real: formato, Clippy y 27 pruebas pasan. Los casos usan repositorios temporales y cubren stash/OID, merge y rebase con conflictos, continuación/aborto, revert, descarte de cambios preparados y sin preparar, renombres y rutas Unicode. La validación local de Entrega 5 se registra en `ESTADO_DEL_PROYECTO.md`.
+
+## Empaquetado
+
+En Windows x86_64, instala Rust 1.99.0 o posterior y ejecuta desde la raíz:
+
+```powershell
+./scripts/package-windows.ps1
+```
+
+El script compila en modo release con `Cargo.lock` y escribe `dist/gitzi-windows-x86_64.zip`. El ZIP contiene `gitzi.exe` e instrucciones en `README.txt`; no incluye Rust ni Git. Para Linux, compila en un host Linux con las bibliotecas de desarrollo de eframe instaladas y distribuye el ejecutable `target/release/gitzi` junto con instrucciones y las bibliotecas gráficas requeridas por el sistema. La CI genera un `.tar.gz` para Linux y un ZIP para Windows como artefactos descargables de la ejecución, retenidos durante 14 días; no crea una publicación o release.
+
+## GitHub y autenticación
+
+Gitzi se conecta a GitHub mediante comandos Git estándar y el remoto configurado en el repositorio. Para habilitar la CI de este proyecto, crea un repositorio GitHub vacío y configura su URL como `origin` (usa la URL real de tu repositorio):
+
+```sh
+git remote add origin https://github.com/OWNER/REPOSITORY.git
+git push -u origin main
+```
+
+Si `origin` ya existe, actualiza su URL con `git remote set-url origin URL` en vez de agregarlo de nuevo. Sustituye `main` por la rama actual si tiene otro nombre. El primer push requiere que completes la autenticación HTTPS con tu credential helper, o uses una URL SSH y una clave/agente SSH configurado. Después del push, GitHub Actions ejecutará el workflow en push; los pull requests y el disparo manual también están configurados. Hasta conectar el remoto y observar una ejecución, la CI remota no está validada. El workflow solo solicita permiso de lectura de contenido, no requiere secretos y no publica releases.
+
+Gitzi no implementa una API de GitHub ni gestiona pull requests o issues. La autenticación depende de Git y de la configuración local del usuario; los paquetes no contienen Git ni credenciales.

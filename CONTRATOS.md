@@ -152,3 +152,27 @@ Se fija eframe `0.36.2` tras verificar la documentación oficial. Se desactivan 
 - StageFile en un conflicto es la vía para marcar ese archivo resuelto. Continuar se habilita cuando no quedan archivos sin resolver; Abort se limita a una integración detectada.
 - La UI muestra política Pull persistida, stash, integración/conflictos, editor externo y confirmaciones que identifican archivo, stash o rama. Operaciones que borran trabajo o referencias requieren confirmar en un segundo paso; branch delete nunca usa force.
 - Selecciones y resultados de stash/detalle se invalidan al cambiar de repo, refrescar o mutar. Los datos de la UI nunca sustituyen la validación de ramas, OID o conflictos que hace el motor.
+
+## Entrega 5: pulido y distribución
+
+### Interfaz (`src/ui/**`, propiedad T5-UI)
+
+- Puede reorganizar componentes y definir el tema dentro de `src/ui/**`; no cambia `domain`, acciones, comandos, contratos de estado ni lógica de Git.
+- Conserva todos los flujos aceptados de Entregas 1–4. No presenta botones sin acción ni sustituye datos reales por ejemplos.
+- Centraliza colores, tipografía y espaciado; conserva etiquetas y señales además del color para comunicar estados. Mantiene contraste legible, foco y operación por teclado en los flujos principales.
+- Hace adaptables paneles y listas a ventanas pequeñas. Diferencias y listas deben respetar límites/truncamiento del dominio y mantener visibles los estados vacíos, ocupados y de error.
+- Evita repintado continuo o animaciones decorativas. La revisión visual manual solo se declara si se pudo hacer en un host gráfico.
+
+### Distribución y CI (`.github/workflows/**`, `scripts/package-windows.ps1`, `README.md`, `.gitignore`, propiedad T5-DIST)
+
+- El workflow no publica releases ni necesita secretos. Usa permisos `contents: read`, se ejecuta en push/PR y puede lanzarse manualmente.
+- La matriz de Windows y Linux instala las bibliotecas nativas requeridas, fija la toolchain compatible y ejecuta `cargo fmt --all -- --check`, `cargo clippy --all-targets -- --deny warnings`, `cargo test` y build release.
+- El workflow empaqueta binarios de Windows y Linux como artefactos de ejecución de Actions; no los publica como releases. El script PowerShell genera un ZIP reproducible de Windows desde el binario release e incluye instrucciones de ejecución/dependencia de Git.
+- Los paquetes no contienen Git: requieren un `git` disponible en PATH y respetan la configuración/credenciales locales del usuario. El README diferencia CI configurada de una ejecución remota observada.
+- No se afirma que GitHub esté conectado ni que el workflow haya corrido hasta que el usuario configure el remoto y haga push.
+
+### Verificación e integración (propiedad del orquestador)
+
+- Tras integrar ambos frentes, repetir formato, Clippy, pruebas y build release en Windows; ejecutar el script de empaquetado y revisar el ZIP.
+- Revisar estáticamente el workflow y el empaquetado Linux. Compatibilidad/GUI de Linux solo se afirma si se ejecutan en Linux; una definición de CI todavía no equivale a una ejecución de Actions.
+- Registrar tamaños y, si el host permite medirlos de forma fiable, arranque/uso en reposo. No declarar inspección visual manual sin haber abierto la ventana en un host gráfico.

@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Entrega actual: 5 — pulido y distribución (Entrega 4 cerrada).
+Entrega actual: MVP inicial — Entregas 1–5 cerradas; ampliaciones posteriores siguen fuera del alcance.
 
 Estado verificado al inicio: el directorio contenía únicamente `ARQUITECTURA_Y_VISION.md`; no era un repositorio Git y no había `AGENTS.md` en los directorios del proyecto/ancestros comprobados. La toolchain Rust 1.99.0 estaba instalada en `C:\Users\alexr\.cargo\bin`, pero no estaba en el PATH del proceso. Se inicializó el repositorio local en `main` para conservar los cambios en commits ordenados.
 
@@ -10,7 +10,7 @@ Validación de Entrega 1 en Windows: `cargo fmt --check` pasó; `cargo test` pas
 
 Validación pendiente que no bloquea Entrega 2: no se pudo inspeccionar visualmente la ventana ni hacer la comprobación manual de teclado/foco; la herramienta de Computer Use de esta sesión informa que las APIs de aplicaciones nativas están deshabilitadas. Tampoco se midieron arranque en frío, Working Set o CPU en reposo. Linux no se probó en este host Windows.
 
-Medición pendiente: con un build release, anotar Windows/hardware, versión de Git, tamaño del repo de muestra y toolchain. Tomar 10 tiempos de arranque en frío desde lanzamiento hasta que la ventana responda; para reposo, esperar 60 s tras abrir el mismo repo y registrar Working Set y el incremento de CPU del proceso. No se inventan resultados sin mediciones.
+Plan de medición de referencia: registrar 10 aperturas en frío hasta respuesta de ventana y, con el mismo repo, 60 s de reposo con Working Set/CPU. La única muestra D5 fue un proceso oculto, no una medición del momento en que la GUI queda lista; no sustituye ese plan.
 
 Entrega 2 cerrada funcionalmente: init/clone, diffs por archivo y área, stage/unstage, commit solo del índice, repo sin commits y estados binarios/conflictivos implementados. El mensaje de commit viaja por stdin y no se agrega a los argumentos del comando. Los cambios preparados y no preparados se conservan separados; se refresca el estado después de mutaciones. El commit de implementación es `285904b` (`feat: complete delivery 2 changes and commits`).
 
@@ -24,4 +24,10 @@ Entrega 4 cerrada funcionalmente: preferencia persistida de Pull (FF-only/Merge/
 
 Verificación integrada de Entrega 4 en Windows con Rust 1.99.0 y Git real: formato, Clippy con `--deny warnings` y 27/27 pruebas pasaron. Las pruebas adicionales crean repositorios temporales y comprueban stash múltiple, OID y archivos untracked, merge/rebase conflictivos con abort, continuación tras resolver, revert, Pull con conflicto, descarte de archivo staged+unstaged, renombre preparado, repositorio sin HEAD y lanzamiento del editor. La revisión independiente no dejó bloqueos funcionales.
 
-Pendientes para Entrega 5: pulido visual, inspección manual de ventana/teclado/foco (la API de aplicaciones nativas no está disponible), mediciones reales de arranque/Working Set/CPU, Linux en host correspondiente y validación remota de GitHub Actions. El checkout no tiene remote configurado y no se probó una cuenta real. La app usa remotes Git HTTPS/SSH y credential helpers estándar; GitHub Pull Requests/issues API continúa fuera del alcance de la arquitectura.
+Entrega 5 implementada: tema y jerarquía visual centralizados, disposición con scroll para ventanas compactas, estados explícitos de archivos y áreas acotadas con scroll bidimensional para diffs/salidas largas. La revisión de código conserva acciones/confirmaciones D1–D4. Añadidos GitHub Actions para push/PR/manual con permisos de lectura, checks Windows/Linux y artefactos ZIP/tar.gz de 14 días, sin releases. El empaquetador Windows produce ZIP portable reproducible que incluye `gitzi.exe` e instrucciones; Git sigue siendo requisito externo.
+
+Verificación integrada D5 en Windows: `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- --deny warnings`, `cargo test --locked` (27/27) y `cargo build --release --locked` pasan con Rust 1.99.0 (`x86_64-pc-windows-msvc`) y Git 2.51.0.windows.2. El ejecutable mide 7.610.880 bytes; el ZIP mide 3.404.469 bytes. El empaquetador se ejecutó dos veces y obtuvo SHA-256 idéntico `F1EC3FCA8E52D3FF9CC56391C7B5278445BD9BE7B74ED73A9D2E8817D78A210F`; contiene solo el ejecutable y `README.txt`. El almacén de objetos Git de este repo de muestra ocupa 216,03 KiB. La revisión independiente T5-VERIFY no encontró bloqueos en el código, el workflow ni el paquete.
+
+Muestra exploratoria de proceso release oculto en Windows: el lanzamiento del proceso tardó 812 ms (no equivale a ventana lista), seguía vivo después de 5 s, Working Set 102.494.208 bytes y CPU adicional 0,000 s en la ventana siguiente de 5 s. `WaitForInputIdle` devolvió falso, CIM no permitió leer hardware/edición del SO y no se abrió visualmente la GUI; por tanto no se afirma arranque frío, idle visual ni revisión manual de teclado/foco. Linux y GitHub Actions remoto tampoco se han ejecutado.
+
+Para activar GitHub hace falta interacción del usuario: no hay `origin` en el checkout y `gh auth status` encontró inválido el token local. Inicia sesión con `gh auth login -h github.com`, configura `origin` con la URL del repo creado y haz push de `main`; entonces se podrá observar la ejecución y descargar artefactos de Actions. La app usa remotes Git HTTPS/SSH y credential helpers estándar; GitHub Pull Requests/issues API continúa fuera del alcance de la arquitectura. Hasta que haya push, el workflow remoto no está verificado; Linux, la inspección visual/manual y una medida real de ventana lista también quedan pendientes y se declaran en README.

@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-package:
+    name: Verify and package (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            platform: windows-x86_64
+          - runner: ubuntu-latest
+            platform: linux-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Linux native build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libssl-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xinput-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+        with:
+          toolchain: 1.99.0
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- --deny warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Windows ZIP
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/linux-x86_64
+          cp target/release/gitzi dist/linux-x86_64/gitzi
+          cat > dist/linux-x86_64/README.txt <<'EOF'
+          Gitzi for Linux x86_64
+
+          Extract this archive and run ./gitzi from a graphical desktop session.
+          Git 2.23 or later must be installed and available as `git` on PATH.
+          Gitzi uses your existing Git configuration, credential helpers and SSH agent.
+          This package does not include Git and does not provide GitHub pull-request/issues APIs.
+          The target system needs the desktop graphics libraries used by eframe (X11 or Wayland and OpenGL).
+          EOF
+          tar --sort=name --mtime='UTC 2000-01-01' --owner=0 --group=0 --numeric-owner \
+            -cf - -C dist/linux-x86_64 . | gzip -n > dist/gitzi-linux-x86_64.tar.gz
+
+      - name: Upload Windows package
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gitzi-windows-x86_64
+          path: dist/gitzi-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Linux package
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gitzi-linux-x86_64
+          path: dist/gitzi-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
