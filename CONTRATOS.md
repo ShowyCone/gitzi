@@ -61,11 +61,12 @@ Se fija eframe `0.36.2` tras verificar la documentación oficial. Se desactivan 
 
 ### Motor Git (`src/git/**`, propiedad T2-GIT)
 
-- Añadirá operaciones tipadas `InitializeRepository`, `CloneRepository`, `ReadDiff`, `StageFile`, `UnstageFile` y `Commit`, con una variante de resultado por operación.
+- `GitOperation` añadirá `InitializeRepository { path }`, `CloneRepository { source, destination }`, `ReadDiff { path, area, untracked }`, `StageFile { path }`, `UnstageFile { path, has_head }` y `Commit { message }`.
+- `GitResult` añadirá `RepositoryInitialized { path }`, `RepositoryCloned { path }`, `DiffLoaded { diff }`, `FileStaged { path }`, `FileUnstaged { path }` y `CommitCreated { path }`.
 - Inicializará con `git init -- <path>` y clonará con `git clone -- <source> <destination>`. El destino no se borra ni se sobrescribe; Git determina si puede clonar ahí.
 - Diff sin preparar: `git --no-optional-locks diff --no-ext-diff --no-textconv --no-color -- <path>`. Diff preparado: misma consulta con `--cached`. Para un archivo untracked, genera el diff contra `/dev/null` con `git diff --no-index`; el código 1 que indica diferencias se considera resultado esperado y se conserva en el registro.
 - Cada flujo de diff se limita a 1 MiB. `binary` y `truncated` comunican el estado real; nunca se presenta salida incompleta como diff completo.
-- Preparar afecta solo el archivo seleccionado, usando `--literal-pathspecs` y `--`. Despreparar conserva el contenido del árbol de trabajo: con HEAD usa `restore --staged`; en un repo sin commits usa `rm --cached` para mantener el archivo en disco.
+- Preparar afecta solo el archivo seleccionado, usando `--literal-pathspecs` y `--`. Despreparar conserva el contenido del árbol de trabajo: con `has_head=true` usa `restore --staged`; en una rama sin commits (`has_head=false`) usa `rm --cached` para mantener el archivo en disco. Si `has_head` no se conoce, la app no ofrece esa acción.
 - Commit usa solo el índice y recibe el mensaje por stdin (`git commit --file=-`), sin incluirlo en los argumentos ni preparar cambios adicionales. No desactiva hooks ni la firma configurada.
 - Las operaciones se serializan en el worker existente. Tras init/clone y cada mutación, la app consulta de nuevo el estado. Rutas como argumentos separados y literales.
 - Las pruebas mutantes y de flujo usan repositorios temporales. Cubren repo sin commits, binarios, nombres con espacios/Unicode, diffs staged y unstaged separados, stage/unstage y commit que conserva cambios no preparados.
