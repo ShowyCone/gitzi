@@ -7,8 +7,16 @@ use eframe::egui;
 
 use crate::domain::{
     AppSnapshot, BranchInfo, BranchKind, CommandEntry, CommandStatus, DiffArea, FileStatus,
-    UiAction,
+    IntegrationKind, PullPolicy, UiAction,
 };
+
+#[derive(Clone, Debug)]
+enum Confirmation {
+    DropStash { oid: String, label: String },
+    DiscardFile(PathBuf),
+    DeleteBranch(String),
+    AbortIntegration { kind: String },
+}
 
 pub struct UiState {
     repository_path: String,
@@ -21,6 +29,7 @@ pub struct UiState {
     commit_message: String,
     branch_name: String,
     selected_local_branch: String,
+    selected_integration_branch: String,
     selected_remote: String,
     selected_remote_branch: String,
     selected_commit: Option<String>,
@@ -28,6 +37,12 @@ pub struct UiState {
     compare_target: String,
     command_log_open: bool,
     copied_command: Option<u64>,
+    editor_path: String,
+    observed_editor: Option<Option<PathBuf>>,
+    stash_message: String,
+    stash_include_untracked: bool,
+    selected_stash: Option<String>,
+    confirmation: Option<Confirmation>,
 }
 
 impl Default for UiState {
@@ -43,6 +58,7 @@ impl Default for UiState {
             commit_message: String::new(),
             branch_name: String::new(),
             selected_local_branch: String::new(),
+            selected_integration_branch: String::new(),
             selected_remote: String::new(),
             selected_remote_branch: String::new(),
             selected_commit: None,
@@ -50,6 +66,12 @@ impl Default for UiState {
             compare_target: String::new(),
             command_log_open: false,
             copied_command: None,
+            editor_path: String::new(),
+            observed_editor: None,
+            stash_message: String::new(),
+            stash_include_untracked: false,
+            selected_stash: None,
+            confirmation: None,
         }
     }
 }
@@ -60,10 +82,19 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
         state.selected_file = None;
         state.requested_diff = None;
         state.selected_commit = None;
+        state.selected_stash = None;
+        state.confirmation = None;
     }
     let available = snapshot.git_checked && snapshot.git_version.is_some();
     let can_act = available && !snapshot.busy;
     let mut action = None;
+    if state.observed_editor.as_ref() != Some(&snapshot.external_editor) {
+        state.editor_path = snapshot
+            .external_editor
+            .as_ref()
+            .map_or_else(String::new, |path| path.display().to_string());
+        state.observed_editor = Some(snapshot.external_editor.clone());
+    }
 
     ui.spacing_mut().item_spacing = egui::vec2(10.0, 8.0);
     ui.visuals_mut().widgets.inactive.corner_radius = egui::CornerRadius::same(6);
@@ -330,6 +361,19 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                                     {
                                         action = Some(UiAction::UnstageFile(file.path.clone()));
                                     }
+                                    if ui
+                                        .add_enabled(
+                                            can_act
+                                                && !file.unmerged
+                                                && (has_staged(file) || has_unstaged(file)),
+                                            egui::Button::new("Descartar…"),
+                                        )
+                                        .clicked()
+                                        && action.is_none()
+                                    {
+                                        state.confirmation =
+                                            Some(Confirmation::DiscardFile(file.path.clone()));
+                                    }
                                     ui.end_row();
                                 }
                             });
@@ -373,6 +417,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
         }
     }
 
+    render_confirmation(ui, state, can_act, &mut action);
+
     ui.add_space(12.0);
     let log_response = egui::CollapsingHeader::new(
         egui::RichText::new(format!(
@@ -399,6 +445,17 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
         }
     });
     state.command_log_open = log_response.body_returned.is_some();
+    if matches!(
+        action.as_ref(),
+        Some(
+            UiAction::Refresh
+                | UiAction::CreateStash { .. }
+                | UiAction::ApplyStash(_)
+                | UiAction::DropStash(_)
+        )
+    ) {
+        state.selected_stash = None;
+    }
     action
 }
 
@@ -429,9 +486,10 @@ fn render_collaboration(
             if snapshot.remotes.is_empty() {
                 ui.label(egui::RichText::new("Configura un remoto para poder hacer fetch.").weak());
             }
+            let pull_label = match snapshot.pull_policy { PullPolicy::FastForwardOnly => "Pull · avance rápido", PullPolicy::Merge => "Pull · merge", PullPolicy::Rebase => "Pull · rebase" };
             let pull = ui.add_enabled(
                 can_act && has_upstream && has_current_local_branch,
-                egui::Button::new("Pull · avance rápido"),
+                egui::Button::new(pull_label),
             );
             if pull.clicked() && action.is_none() {
                 *action = Some(UiAction::Pull);
@@ -450,6 +508,28 @@ fn render_collaboration(
                 ui.label(egui::RichText::new("Pull y Push requieren una rama local actual; no están disponibles en HEAD separado o sin commits.").weak());
             }
         });
+        ui.collapsing("Preferencias", |ui| {
+            let mut policy = snapshot.pull_policy;
+            egui::ComboBox::from_label("Política de Pull")
+                .selected_text(match policy { PullPolicy::FastForwardOnly => "Solo avance rápido", PullPolicy::Merge => "Merge", PullPolicy::Rebase => "Rebase" })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut policy, PullPolicy::FastForwardOnly, "Solo avance rápido");
+                    ui.selectable_value(&mut policy, PullPolicy::Merge, "Merge");
+                    ui.selectable_value(&mut policy, PullPolicy::Rebase, "Rebase");
+                });
+            if policy != snapshot.pull_policy && can_act && action.is_none() { *action = Some(UiAction::SetPullPolicy(policy)); }
+            ui.label("La política se guarda en Gitzi y se muestra en el botón Pull.");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Ejecutable del editor externo");
+                ui.add(egui::TextEdit::singleline(&mut state.editor_path).hint_text("Ruta del ejecutable").desired_width(240.0));
+                let save = ui.add_enabled(can_act && action.is_none() && state.editor_path.trim() != snapshot.external_editor.as_ref().map_or("", |path| path.to_str().unwrap_or("")), egui::Button::new("Guardar editor"));
+                if save.clicked() { let path = state.editor_path.trim(); *action = Some(UiAction::SetExternalEditor((!path.is_empty()).then(|| PathBuf::from(path)))); }
+                let clear = ui.add_enabled(can_act && action.is_none() && snapshot.external_editor.is_some(), egui::Button::new("Quitar"));
+                if clear.clicked() { state.editor_path.clear(); *action = Some(UiAction::SetExternalEditor(None)); }
+            });
+            if snapshot.external_editor.is_none() { ui.label("Sin editor configurado: abrir conflictos no está disponible."); }
+        });
+        render_recovery(ui, state, snapshot, repository, can_act, action);
         ui.horizontal_wrapped(|ui| {
             ui.label("Adelante/atrás respecto a referencias locales conocidas:");
             ui.label(format!("↑ {} · ↓ {}", repository.ahead, repository.behind));
@@ -581,6 +661,251 @@ fn render_collaboration(
 
 fn short_id(id: &str) -> &str {
     id.get(..id.len().min(12)).unwrap_or(id)
+}
+
+fn render_recovery(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    snapshot: &AppSnapshot,
+    repository: &crate::domain::RepositoryStatus,
+    can_act: bool,
+    action: &mut Option<UiAction>,
+) {
+    let local: Vec<&BranchInfo> = snapshot
+        .branches
+        .iter()
+        .filter(|branch| branch.kind == BranchKind::Local)
+        .collect();
+    ui.collapsing("Integración y recuperación", |ui| {
+        let conflicts: Vec<&FileStatus> = repository.files.iter().filter(|file| file.unmerged || file.index_status == 'U' || file.worktree_status == 'U').collect();
+        if let Some(kind) = repository.integration {
+            ui.label(egui::RichText::new(format!("Operación en curso: {}", match kind { IntegrationKind::Merge => "Merge", IntegrationKind::Rebase => "Rebase", IntegrationKind::Revert => "Revert" })).strong());
+            if conflicts.is_empty() {
+                ui.label("No quedan conflictos detectados. Puedes continuar o abortar la operación.");
+            } else {
+                ui.label(egui::RichText::new(format!("Conflictos sin resolver: {}. Selecciona Preparar para marcar un archivo resuelto.", conflicts.len())).color(ui.visuals().warn_fg_color));
+                for file in &conflicts {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.monospace(file.path.display().to_string());
+                        let editor = ui.add_enabled(can_act && action.is_none() && snapshot.external_editor.is_some(), egui::Button::new("Abrir en editor"));
+                        if editor.clicked() { *action = Some(UiAction::OpenConflictFile(file.path.clone())); }
+                        let resolved = ui.add_enabled(can_act && action.is_none(), egui::Button::new("Preparar como resuelto"));
+                        if resolved.clicked() { *action = Some(UiAction::StageFile(file.path.clone())); }
+                    });
+                }
+            }
+            ui.horizontal(|ui| {
+                let continue_op = ui.add_enabled(can_act && action.is_none() && conflicts.is_empty(), egui::Button::new("Continuar integración"));
+                if continue_op.clicked() { *action = Some(UiAction::ContinueIntegration); }
+                let abort = ui.add_enabled(can_act && action.is_none(), egui::Button::new("Abortar integración…"));
+                if abort.clicked() {
+                    state.confirmation = Some(Confirmation::AbortIntegration {
+                        kind: match kind { IntegrationKind::Merge => "merge", IntegrationKind::Rebase => "rebase", IntegrationKind::Revert => "revert" }.to_owned(),
+                    });
+                }
+            });
+        } else {
+            ui.label("No hay una integración en curso.");
+            let clean = repository.files.is_empty();
+            let ready = can_act && action.is_none() && clean && repository.has_head == Some(true);
+            if local.is_empty() {
+                ui.label("No hay ramas locales para integrar.");
+            } else {
+                let branches: Vec<&BranchInfo> = local.iter().copied().filter(|branch| !branch.current).collect();
+                if branches.is_empty() { ui.label("No hay otra rama local disponible."); }
+                else {
+                    if !branches.iter().any(|branch| branch.name == state.selected_integration_branch) { state.selected_integration_branch = branches[0].name.clone(); }
+                    egui::ComboBox::from_label("Rama local de origen").selected_text(&state.selected_integration_branch).show_ui(ui, |ui| {
+                        for branch in &branches { ui.selectable_value(&mut state.selected_integration_branch, branch.name.clone(), &branch.name); }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add_enabled(ready, egui::Button::new("Merge rama")).clicked() { *action = Some(UiAction::MergeBranch(state.selected_integration_branch.clone())); }
+                        if ui.add_enabled(ready, egui::Button::new("Rebase sobre rama")).clicked() { *action = Some(UiAction::RebaseBranch(state.selected_integration_branch.clone())); }
+                    });
+                }
+            }
+            if !clean { ui.label("Merge, Rebase y Revert requieren un árbol de trabajo limpio."); }
+            let selected = snapshot.history.iter().find(|commit| state.selected_commit.as_deref() == Some(&commit.id));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(selected.map_or("Selecciona un commit del historial para revertir.".to_owned(), |commit| format!("Commit seleccionado: {} · {}", short_id(&commit.id), commit.subject)));
+                let revert = ui.add_enabled(ready && selected.is_some(), egui::Button::new("Revertir commit seleccionado"));
+                if revert.clicked() && let Some(commit) = selected {
+                    *action = Some(UiAction::RevertCommit(commit.id.clone()));
+                }
+            });
+        }
+    });
+
+    ui.collapsing("Stash", |ui| {
+        ui.label("Guarda temporalmente cambios sin crear un commit.");
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.stash_message)
+                    .hint_text("Mensaje opcional")
+                    .desired_width(240.0),
+            );
+            ui.checkbox(
+                &mut state.stash_include_untracked,
+                "Incluir archivos sin seguimiento",
+            );
+            let has_changes = !repository.files.is_empty();
+            if ui
+                .add_enabled(
+                    can_act && action.is_none() && has_changes,
+                    egui::Button::new("Crear stash"),
+                )
+                .clicked()
+            {
+                *action = Some(UiAction::CreateStash {
+                    message: (!state.stash_message.trim().is_empty())
+                        .then(|| state.stash_message.trim().to_owned()),
+                    include_untracked: state.stash_include_untracked,
+                });
+            }
+        });
+        if snapshot.stashes.is_empty() {
+            ui.label(if snapshot.busy {
+                "Cargando stashes…"
+            } else {
+                "No hay stashes en este repositorio."
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("stash_list")
+                .max_height(150.0)
+                .show(ui, |ui| {
+                    for stash in &snapshot.stashes {
+                        ui.horizontal_wrapped(|ui| {
+                            let label = format!("{} · {}", stash.selector, stash.message);
+                            let selected = state.selected_stash.as_deref() == Some(&stash.oid);
+                            if ui.selectable_label(selected, label.clone()).clicked() {
+                                if !selected {
+                                    state.selected_stash = Some(stash.oid.clone());
+                                }
+                                if action.is_none() {
+                                    *action = Some(UiAction::LoadStashDetail(stash.oid.clone()));
+                                }
+                            }
+                            if ui
+                                .add_enabled(
+                                    can_act && action.is_none(),
+                                    egui::Button::new("Aplicar sin eliminar"),
+                                )
+                                .clicked()
+                            {
+                                *action = Some(UiAction::ApplyStash(stash.oid.clone()));
+                            }
+                            if ui
+                                .add_enabled(
+                                    can_act && action.is_none(),
+                                    egui::Button::new("Eliminar…"),
+                                )
+                                .clicked()
+                            {
+                                state.confirmation = Some(Confirmation::DropStash {
+                                    oid: stash.oid.clone(),
+                                    label,
+                                });
+                            }
+                        });
+                    }
+                });
+            if let Some(detail) = snapshot
+                .stash_detail
+                .as_ref()
+                .filter(|detail| state.selected_stash.as_deref() == Some(&detail.oid))
+            {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label(egui::RichText::new("Detalle del stash seleccionado").strong());
+                    if detail.truncated {
+                        ui.label(
+                            egui::RichText::new("Diff truncado; el contenido está incompleto.")
+                                .color(ui.visuals().warn_fg_color),
+                        );
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("stash_detail")
+                        .max_height(220.0)
+                        .show(ui, |ui| ui.monospace(&detail.diff));
+                });
+            } else if state.selected_stash.is_some() && snapshot.busy {
+                loading_state(ui, "Cargando detalle del stash…");
+            }
+        }
+    });
+
+    ui.collapsing("Ramas locales", |ui| {
+        for branch in &local {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "{}{}",
+                    branch.name,
+                    if branch.current { " · actual" } else { "" }
+                ));
+                if !branch.current
+                    && ui
+                        .add_enabled(can_act && action.is_none(), egui::Button::new("Eliminar…"))
+                        .clicked()
+                {
+                    state.confirmation = Some(Confirmation::DeleteBranch(branch.name.clone()));
+                }
+            });
+        }
+    });
+}
+
+fn render_confirmation(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    can_act: bool,
+    action: &mut Option<UiAction>,
+) {
+    let Some(confirmation) = state.confirmation.clone() else {
+        return;
+    };
+    let mut open = true;
+    egui::Window::new("Confirmar operación")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            match &confirmation {
+                Confirmation::DropStash { label, .. } => {
+                    ui.label(format!("Se eliminará este stash de forma permanente: {label}"));
+                    ui.label("Esta acción no se puede deshacer desde Gitzi.");
+                }
+                Confirmation::DiscardFile(path) => {
+                    ui.label("Se eliminarán los cambios preparados y sin preparar de este archivo:");
+                    ui.monospace(path.display().to_string());
+                    ui.label("Los cambios de este archivo no se conservarán.");
+                }
+                Confirmation::DeleteBranch(name) => {
+                    ui.label("Se solicitará eliminar esta rama local (sin forzar):");
+                    ui.monospace(name);
+                    ui.label("Git rechazará el borrado si la rama no está fusionada.");
+                }
+                Confirmation::AbortIntegration { kind } => {
+                    ui.label(format!("Se abortará la operación de {kind} en curso."));
+                    ui.label("Se descartará la integración y los cambios preparados y sin preparar realizados al resolver conflictos.");
+                }
+            }
+            ui.horizontal(|ui| {
+                let confirm = ui.add_enabled(can_act, egui::Button::new("Confirmar operación"));
+                if confirm.clicked() {
+                    *action = Some(match confirmation {
+                        Confirmation::DropStash { oid, .. } => UiAction::DropStash(oid),
+                        Confirmation::DiscardFile(path) => UiAction::DiscardFile(path),
+                        Confirmation::DeleteBranch(name) => UiAction::DeleteBranch(name),
+                        Confirmation::AbortIntegration { .. } => UiAction::AbortIntegration,
+                    });
+                    state.confirmation = None;
+                }
+                if ui.button("Cancelar").clicked() { state.confirmation = None; }
+            });
+        });
+    if !open {
+        state.confirmation = None;
+    }
 }
 
 fn format_known_time(time: std::time::SystemTime) -> String {

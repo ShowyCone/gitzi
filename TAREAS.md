@@ -27,4 +27,21 @@
 | T3-UI | Agente de interfaz | Controles de colaboración e historia en español | `src/ui/**` | Snapshot/acciones T3 en `src/domain.rs` y `CONTRATOS.md` | Operaciones solicitadas disponibles con estados vacíos/carga/error; upstream ausente explícito; historial, detalle y comparación; acciones limitadas a refs actuales | aceptada |
 | T3-VERIFY | Agente verificador | Revisión independiente del flujo integrado | Sin cambios de producción | Integración T3-APP/T3-GIT/T3-UI coherente | 18 pruebas pasan con Git real; dos clones intercambian cambios con remoto bare; push rechazado nunca fuerza; revisión de ramas, upstream, paginación y comparación; limitaciones documentadas | aceptada |
 
-Pendiente arquitectónico para Entrega 4: la Entrega 3 ofrece Pull FF-only visible y fijo. La preferencia persistida de política y las opciones explícitas de Merge/Rebase aún no están implementadas.
+Entrega 4 completa la preferencia persistida de Pull y las opciones explícitas de integración que faltaban tras D3.
+
+## Entrega 4 — integración y recuperación
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T4-APP | Orquestador | Tipos, preferencias persistidas, validación, coordinación y documentación | `src/domain.rs`, `src/app.rs`, `src/settings.rs`, docs raíz | Contrato T4 en `CONTRATOS.md` | Política Pull persistida; respuestas obsoletas ignoradas; errores parciales refrescan estado | aceptada |
+| T4-GIT | Agente de motor | Stash, integración, conflictos, descarte y editor externo | `src/git/runner.rs` | Contrato T4 y tipos de dominio fijados por T4-APP | Operaciones Git reales y seguras; sin force ni borrado sin alcance; pruebas temporales con conflictos y rutas literales | aceptada |
+| T4-UI | Agente de interfaz | Flujos de stash, integración, resolución y confirmaciones | `src/ui/**` | Tipos de dominio y acciones T4 fijados por T4-APP | Política/editor configurables; conflicto visible; confirma abort, stash drop, branch delete y discard | aceptada |
+| T4-VERIFY | Agente de verificación | Auditoría independiente de D4 integrada | Sin cambios de producción | T4-APP/T4-GIT/T4-UI integrados | 27 pruebas Windows con Git real; fmt y Clippy sin warnings; revisión de seguridad sin bloqueos | aceptada |
+
+## Entrega 5 — pulido y distribución
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T5-UI | Agente de interfaz | Jerarquía visual, tema, adaptación a ventana, lectura/teclado, estados y diffs grandes | `src/ui/**` | D4 aceptada; no altera dominio ni comandos | Interfaz en español coherente; controles legibles con estados ocupados/vacíos/error/truncamiento; navegación y accesibilidad verificadas cuando el host lo permite | pendiente |
+| T5-DIST | Agente de distribución | CI de GitHub Actions, empaquetado Windows y matriz de build/test para Linux | `.github/workflows/**`, `scripts/package-windows.ps1`, `README.md`, `.gitignore` | D4 aceptada; dependencias de plataforma documentadas | paquete Windows reproducible; workflow prueba Windows/Linux y publica artefactos de ejecución; no reclama ejecución remota hasta conectar un repo | pendiente |
+| T5-VERIFY | Agente de verificación | Auditoría final integrada de MVP y límites de plataforma | Sin cambios de producción | T5-UI/T5-DIST integrados | fmt, Clippy, pruebas y build Windows pasan; workflow revisado; plataforma visual/Linux y mediciones se declaran según evidencia | pendiente |

@@ -1,6 +1,6 @@
 # Estado del proyecto
 
-Entrega actual: 4 — integración y recuperación (siguiente; Entrega 3 cerrada).
+Entrega actual: 5 — pulido y distribución (Entrega 4 cerrada).
 
 Estado verificado al inicio: el directorio contenía únicamente `ARQUITECTURA_Y_VISION.md`; no era un repositorio Git y no había `AGENTS.md` en los directorios del proyecto/ancestros comprobados. La toolchain Rust 1.99.0 estaba instalada en `C:\Users\alexr\.cargo\bin`, pero no estaba en el PATH del proceso. Se inicializó el repositorio local en `main` para conservar los cambios en commits ordenados.
 
@@ -20,4 +20,8 @@ Entrega 3 cerrada funcionalmente: Fetch, Pull FF-only, Push y publicación segur
 
 Verificación integrada de Entrega 3 en Windows con Rust 1.99.0 y Git real: `cargo fmt --all -- --check`, `cargo test` (18/18), `cargo clippy --all-targets -- --deny warnings` y `cargo build` pasaron. La prueba de colaboración usa dos clones y un remoto bare temporal; verifica fetch, fast-forward, historial, comparación, Push/Publish con refspec OID, preservación de refs ante rechazo y upstream explícito. La revisión independiente no encontró defectos pendientes que bloqueen el cierre.
 
-Pendientes: no se pudo inspeccionar visualmente la ventana ni probar teclado/foco porque las APIs nativas no están disponibles; no se probó Linux ni se midieron arranque en frío, Working Set o CPU en reposo. La autenticación se validó mediante configuración y Git local, sin una cuenta de proveedor real. Entrega 3 ofrece Pull FF-only fijo y visible; persistir una selección de política y ofrecer Merge/Rebase queda para Entrega 4. Siguiente entrega: integración y recuperación; no iniciada.
+Entrega 4 cerrada funcionalmente: preferencia persistida de Pull (FF-only/Merge/Rebase); stash por OID; Merge/Rebase/Revert; inspección, continuación y aborto de conflictos; editor externo; descarte exacto confirmado y eliminación de ramas sin force. Los errores de integración refrescan estado sin borrar el error visible. Contrato actualizado en `CONTRATOS.md`.
+
+Verificación integrada de Entrega 4 en Windows con Rust 1.99.0 y Git real: formato, Clippy con `--deny warnings` y 27/27 pruebas pasaron. Las pruebas adicionales crean repositorios temporales y comprueban stash múltiple, OID y archivos untracked, merge/rebase conflictivos con abort, continuación tras resolver, revert, Pull con conflicto, descarte de archivo staged+unstaged, renombre preparado, repositorio sin HEAD y lanzamiento del editor. La revisión independiente no dejó bloqueos funcionales.
+
+Pendientes para Entrega 5: pulido visual, inspección manual de ventana/teclado/foco (la API de aplicaciones nativas no está disponible), mediciones reales de arranque/Working Set/CPU, Linux en host correspondiente y validación remota de GitHub Actions. El checkout no tiene remote configurado y no se probó una cuenta real. La app usa remotes Git HTTPS/SSH y credential helpers estándar; GitHub Pull Requests/issues API continúa fuera del alcance de la arquitectura.

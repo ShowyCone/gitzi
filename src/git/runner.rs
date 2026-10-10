@@ -1,6 +1,7 @@
 use crate::domain::{
     BranchInfo, BranchKind, CommandEntry, CommandStatus, CommitDetail, CommitFileChange,
-    CommitSummary, DiffArea, FileDiff, RefComparison, RemoteInfo, RepositoryStatus,
+    CommitSummary, DiffArea, FileDiff, IntegrationKind, PullPolicy, RefComparison, RemoteInfo,
+    RepositoryStatus, StashDetail, StashEntry,
 };
 use std::{
     ffi::OsString,
@@ -60,7 +61,10 @@ pub enum GitOperation {
         remote_branch: String,
     },
     Fetch(PathBuf),
-    PullFastForward(PathBuf),
+    Pull {
+        repository: PathBuf,
+        policy: PullPolicy,
+    },
     Push {
         repository: PathBuf,
         upstream: String,
@@ -84,6 +88,52 @@ pub enum GitOperation {
         repository: PathBuf,
         base_ref: String,
         target_ref: String,
+    },
+    ListStashes(PathBuf),
+    CreateStash {
+        repository: PathBuf,
+        message: Option<String>,
+        include_untracked: bool,
+    },
+    LoadStashDetail {
+        repository: PathBuf,
+        stash_oid: String,
+    },
+    ApplyStash {
+        repository: PathBuf,
+        stash_oid: String,
+    },
+    DropStash {
+        repository: PathBuf,
+        stash_oid: String,
+    },
+    MergeBranch {
+        repository: PathBuf,
+        branch: String,
+    },
+    RebaseBranch {
+        repository: PathBuf,
+        branch: String,
+    },
+    RevertCommit {
+        repository: PathBuf,
+        commit_id: String,
+    },
+    ContinueIntegration(PathBuf),
+    AbortIntegration(PathBuf),
+    DiscardFile {
+        repository: PathBuf,
+        path: PathBuf,
+        has_head: bool,
+    },
+    DeleteBranch {
+        repository: PathBuf,
+        name: String,
+    },
+    OpenConflictFile {
+        repository: PathBuf,
+        path: PathBuf,
+        editor: PathBuf,
     },
 }
 
@@ -161,6 +211,41 @@ pub enum GitResult {
         repository: PathBuf,
         comparison: RefComparison,
     },
+    StashesListed {
+        repository: PathBuf,
+        stashes: Vec<StashEntry>,
+    },
+    StashCreated {
+        repository: PathBuf,
+    },
+    StashDetailLoaded {
+        repository: PathBuf,
+        detail: StashDetail,
+    },
+    StashApplied {
+        repository: PathBuf,
+    },
+    StashDropped {
+        repository: PathBuf,
+    },
+    IntegrationCompleted {
+        repository: PathBuf,
+    },
+    IntegrationContinued {
+        repository: PathBuf,
+    },
+    IntegrationAborted {
+        repository: PathBuf,
+    },
+    FileDiscarded {
+        repository: PathBuf,
+    },
+    BranchDeleted {
+        repository: PathBuf,
+    },
+    ExternalFileOpened {
+        repository: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -230,6 +315,7 @@ pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
             let mut commands = vec![entry];
             if let Ok(GitResult::RepositoryInspected { status, .. }) = &mut result {
                 status.last_fetch_at = fetch_timestamp(&path, &mut commands);
+                status.integration = detect_integration(&path, &mut commands);
             }
             (result, commands)
         }
@@ -386,12 +472,25 @@ pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
         | GitOperation::SwitchBranch { .. }
         | GitOperation::SetUpstream { .. }
         | GitOperation::Fetch(_)
-        | GitOperation::PullFastForward(_)
+        | GitOperation::Pull { .. }
         | GitOperation::Push { .. }
         | GitOperation::PublishBranch { .. }
         | GitOperation::LoadHistory { .. }
         | GitOperation::LoadCommitDetail { .. }
         | GitOperation::CompareReferences { .. }) => handle_collaboration(operation),
+        operation @ (GitOperation::ListStashes(_)
+        | GitOperation::CreateStash { .. }
+        | GitOperation::LoadStashDetail { .. }
+        | GitOperation::ApplyStash { .. }
+        | GitOperation::DropStash { .. }
+        | GitOperation::MergeBranch { .. }
+        | GitOperation::RebaseBranch { .. }
+        | GitOperation::RevertCommit { .. }
+        | GitOperation::ContinueIntegration(_)
+        | GitOperation::AbortIntegration(_)
+        | GitOperation::DiscardFile { .. }
+        | GitOperation::DeleteBranch { .. }
+        | GitOperation::OpenConflictFile { .. }) => handle_recovery(operation),
     };
     GitResponse {
         id: request.id,
@@ -407,7 +506,9 @@ fn handle_collaboration(
     let repository = match &operation {
         GitOperation::ListBranches(path)
         | GitOperation::Fetch(path)
-        | GitOperation::PullFastForward(path)
+        | GitOperation::Pull {
+            repository: path, ..
+        }
         | GitOperation::Push {
             repository: path, ..
         } => path.clone(),
@@ -518,15 +619,22 @@ fn handle_collaboration(
             },
             &mut commands,
         ),
-        GitOperation::PullFastForward(_) => sync_operation(
-            &repository,
-            strings(&["pull", "--ff-only"]),
-            "No se pudo integrar los cambios mediante avance rápido",
-            GitResult::Pulled {
-                repository: repository.clone(),
-            },
-            &mut commands,
-        ),
+        GitOperation::Pull { policy, .. } => {
+            let flag = match policy {
+                PullPolicy::FastForwardOnly => "--ff-only",
+                PullPolicy::Merge => "--no-rebase",
+                PullPolicy::Rebase => "--rebase",
+            };
+            sync_operation(
+                &repository,
+                strings(&["pull", flag]),
+                "No se pudieron integrar los cambios",
+                GitResult::Pulled {
+                    repository: repository.clone(),
+                },
+                &mut commands,
+            )
+        }
         GitOperation::Push {
             upstream,
             local_branch,
@@ -1253,6 +1361,671 @@ fn fetch_timestamp(repository: &Path, commands: &mut Vec<CommandEntry>) -> Optio
     std::fs::metadata(path).ok()?.modified().ok()
 }
 
+fn detect_integration(
+    repository: &Path,
+    commands: &mut Vec<CommandEntry>,
+) -> Option<IntegrationKind> {
+    for (file, kind) in [
+        ("rebase-merge", IntegrationKind::Rebase),
+        ("rebase-apply", IntegrationKind::Rebase),
+        ("MERGE_HEAD", IntegrationKind::Merge),
+        ("REVERT_HEAD", IntegrationKind::Revert),
+    ] {
+        let args = strings(&["rev-parse", "--git-path", file]);
+        let (entry, output) = run_git(repository, &args);
+        commands.push(entry);
+        let path = output
+            .ok()
+            .filter(|o| o.status.success() && !o.stdout.truncated)
+            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout.bytes).trim().to_owned()))?;
+        let path = if path.is_absolute() {
+            path
+        } else {
+            repository.join(path)
+        };
+        if path.exists() {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+fn handle_recovery(op: GitOperation) -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
+    let repo = match &op {
+        GitOperation::ListStashes(p)
+        | GitOperation::ContinueIntegration(p)
+        | GitOperation::AbortIntegration(p) => p.clone(),
+        GitOperation::CreateStash { repository, .. }
+        | GitOperation::LoadStashDetail { repository, .. }
+        | GitOperation::ApplyStash { repository, .. }
+        | GitOperation::DropStash { repository, .. }
+        | GitOperation::MergeBranch { repository, .. }
+        | GitOperation::RebaseBranch { repository, .. }
+        | GitOperation::RevertCommit { repository, .. }
+        | GitOperation::DiscardFile { repository, .. }
+        | GitOperation::DeleteBranch { repository, .. }
+        | GitOperation::OpenConflictFile { repository, .. } => repository.clone(),
+        _ => unreachable!(),
+    };
+    let mut log = Vec::new();
+    let result = match op {
+        GitOperation::ListStashes(_) => {
+            let args = strings(&["stash", "list", "--format=%x00%H%x00%gd%x00%gs%x00%ct"]);
+            let (e, o) = run_git(&repo, &args);
+            log.push(e);
+            o.map_err(process_error)
+                .and_then(|o| require_success(o, &log[0], "No se pudieron listar los stashes"))
+                .and_then(|o| parse_stashes(&o.stdout.bytes))
+                .map(|stashes| GitResult::StashesListed {
+                    repository: repo.clone(),
+                    stashes,
+                })
+        }
+        GitOperation::CreateStash {
+            message,
+            include_untracked,
+            ..
+        } => {
+            let mut args = vec!["stash".into(), "push".into()];
+            if include_untracked {
+                args.push("--include-untracked".into());
+            }
+            if let Some(m) = message {
+                args.push("-m".into());
+                args.push(m.into());
+            }
+            let (e, o) = run_git(&repo, &args);
+            log.push(e);
+            successful_mutation(o, &log[0], "No se pudo crear el stash").map(|()| {
+                GitResult::StashCreated {
+                    repository: repo.clone(),
+                }
+            })
+        }
+        GitOperation::LoadStashDetail { stash_oid, .. } => {
+            stash_by_oid(&repo, &stash_oid, &mut log).and_then(|selector| {
+                let args = strings(&[
+                    "stash",
+                    "show",
+                    "--include-untracked",
+                    "--no-ext-diff",
+                    "--binary",
+                    "--patch",
+                    &selector,
+                ]);
+                let (e, o) = run_git(&repo, &args);
+                log.push(e);
+                o.map_err(process_error)
+                    .and_then(|o| {
+                        require_success(o, log.last().unwrap(), "No se pudo inspeccionar el stash")
+                    })
+                    .map(|o| GitResult::StashDetailLoaded {
+                        repository: repo.clone(),
+                        detail: StashDetail {
+                            oid: stash_oid,
+                            diff: capture_text(&o.stdout),
+                            truncated: o.stdout.truncated,
+                        },
+                    })
+            })
+        }
+        GitOperation::ApplyStash { stash_oid, .. } => {
+            stash_mutation(&repo, &stash_oid, false, &mut log)
+        }
+        GitOperation::DropStash { stash_oid, .. } => {
+            stash_mutation(&repo, &stash_oid, true, &mut log)
+        }
+        GitOperation::MergeBranch { branch, .. } => {
+            branch_integration(&repo, &branch, true, &mut log)
+        }
+        GitOperation::RebaseBranch { branch, .. } => {
+            branch_integration(&repo, &branch, false, &mut log)
+        }
+        GitOperation::RevertCommit { commit_id, .. } => resolve_commit(&repo, &commit_id, &mut log)
+            .and_then(|resolved| validate_integration_ready(&repo, &mut log).map(|()| resolved))
+            .and_then(|resolved| {
+                let args = strings(&["revert", "--no-edit", "--", &resolved]);
+                let (e, o) = run_git(&repo, &args);
+                log.push(e);
+                successful_mutation(o, log.last().unwrap(), "No se pudo revertir el commit").map(
+                    |()| GitResult::IntegrationCompleted {
+                        repository: repo.clone(),
+                    },
+                )
+            }),
+        GitOperation::ContinueIntegration(_) => finish_integration(&repo, true, &mut log),
+        GitOperation::AbortIntegration(_) => finish_integration(&repo, false, &mut log),
+        GitOperation::DeleteBranch { name, .. } => {
+            let current = git_text(&repo, &["branch", "--show-current"], &mut log);
+            current.and_then(|cur| {
+                if cur == name {
+                    Err(GitError {
+                        message: "No se puede eliminar la rama actual.".into(),
+                    })
+                } else {
+                    let a = strings(&["branch", "-d", "--", &name]);
+                    let (e, o) = run_git(&repo, &a);
+                    log.push(e);
+                    successful_mutation(o, log.last().unwrap(), "No se pudo eliminar la rama").map(
+                        |()| GitResult::BranchDeleted {
+                            repository: repo.clone(),
+                        },
+                    )
+                }
+            })
+        }
+        GitOperation::OpenConflictFile { path, editor, .. } => {
+            launch_editor(&repo, &path, &editor, &mut log).map(|()| GitResult::ExternalFileOpened {
+                repository: repo.clone(),
+            })
+        }
+        GitOperation::DiscardFile { path, has_head, .. } => {
+            discard_file(&repo, &path, has_head, &mut log).map(|()| GitResult::FileDiscarded {
+                repository: repo.clone(),
+            })
+        }
+        _ => unreachable!(),
+    };
+    (result, log)
+}
+
+fn parse_stashes(bytes: &[u8]) -> Result<Vec<StashEntry>, GitError> {
+    let fields = bytes
+        .split(|b| *b == 0)
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>();
+    if fields.len() % 4 != 0 {
+        return Err(GitError {
+            message: "La lista de stash está incompleta.".into(),
+        });
+    }
+    Ok(fields
+        .chunks(4)
+        .map(|c| StashEntry {
+            oid: String::from_utf8_lossy(c[0]).trim().to_owned(),
+            selector: String::from_utf8_lossy(c[1]).trim().to_owned(),
+            message: String::from_utf8_lossy(c[2]).to_string(),
+            created_at: UNIX_EPOCH
+                + Duration::from_secs(String::from_utf8_lossy(c[3]).trim().parse().unwrap_or(0)),
+        })
+        .collect())
+}
+fn stash_mutation(
+    repo: &Path,
+    oid: &str,
+    drop_stash: bool,
+    log: &mut Vec<CommandEntry>,
+) -> Result<GitResult, GitError> {
+    stash_by_oid(repo, oid, log).and_then(|selector| {
+        let args = if drop_stash {
+            strings(&["stash", "drop", &selector])
+        } else {
+            strings(&["stash", "apply", &selector])
+        };
+        let (e, o) = run_git(repo, &args);
+        log.push(e);
+        successful_mutation(o, log.last().unwrap(), "No se pudo modificar el stash").map(|()| {
+            if drop_stash {
+                GitResult::StashDropped {
+                    repository: repo.to_path_buf(),
+                }
+            } else {
+                GitResult::StashApplied {
+                    repository: repo.to_path_buf(),
+                }
+            }
+        })
+    })
+}
+fn branch_integration(
+    repo: &Path,
+    branch: &str,
+    merge: bool,
+    log: &mut Vec<CommandEntry>,
+) -> Result<GitResult, GitError> {
+    if branch.starts_with('-') {
+        return Err(GitError {
+            message: "La rama no puede comenzar con guion.".into(),
+        });
+    }
+    let target_ref = format!("refs/heads/{branch}");
+    let args = strings(&["show-ref", "--verify", "--quiet", &target_ref]);
+    let (entry, output) = run_git(repo, &args);
+    log.push(entry);
+    match output {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            return Err(command_error(
+                "La rama local seleccionada ya no existe",
+                log.last().unwrap(),
+                &output.stderr,
+            ));
+        }
+        Err(error) => {
+            return Err(GitError {
+                message: format!("No se pudo verificar la rama local. {error}"),
+            });
+        }
+    }
+    validate_integration_ready(repo, log).and_then(|()| {
+        let args = if merge {
+            strings(&["merge", "--no-edit", "--", branch])
+        } else {
+            strings(&["rebase", "--", branch])
+        };
+        let (e, o) = run_git(repo, &args);
+        log.push(e);
+        successful_mutation(o, log.last().unwrap(), "No se pudo integrar la rama").map(|()| {
+            GitResult::IntegrationCompleted {
+                repository: repo.to_path_buf(),
+            }
+        })
+    })
+}
+
+fn finish_integration(
+    repo: &Path,
+    continuing: bool,
+    log: &mut Vec<CommandEntry>,
+) -> Result<GitResult, GitError> {
+    let kind = detect_integration(repo, log).ok_or_else(|| GitError {
+        message: "No hay una integración activa que continuar o abortar.".into(),
+    })?;
+    let args = match (kind, continuing) {
+        (IntegrationKind::Merge, true) => strings(&["merge", "--continue"]),
+        (IntegrationKind::Merge, false) => strings(&["merge", "--abort"]),
+        (IntegrationKind::Rebase, true) => strings(&["rebase", "--continue"]),
+        (IntegrationKind::Rebase, false) => strings(&["rebase", "--abort"]),
+        (IntegrationKind::Revert, true) => strings(&["revert", "--continue"]),
+        (IntegrationKind::Revert, false) => strings(&["revert", "--abort"]),
+    };
+    let (e, o) = run_git(repo, &args);
+    log.push(e);
+    successful_mutation(o, log.last().unwrap(), "No se pudo completar la operación").map(|()| {
+        if continuing {
+            GitResult::IntegrationContinued {
+                repository: repo.to_path_buf(),
+            }
+        } else {
+            GitResult::IntegrationAborted {
+                repository: repo.to_path_buf(),
+            }
+        }
+    })
+}
+fn stash_by_oid(repo: &Path, oid: &str, log: &mut Vec<CommandEntry>) -> Result<String, GitError> {
+    let a = strings(&["stash", "list", "--format=%x00%H%x00%gd"]);
+    let (e, o) = run_git(repo, &a);
+    log.push(e);
+    let out = o
+        .map_err(process_error)
+        .and_then(|o| require_success(o, log.last().unwrap(), "No se pudo resolver el stash"))?;
+    for pair in out
+        .stdout
+        .bytes
+        .split(|b| *b == 0)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>()
+        .chunks(2)
+    {
+        if pair.len() == 2 && String::from_utf8_lossy(pair[0]).trim() == oid {
+            return Ok(String::from_utf8_lossy(pair[1]).trim().to_owned());
+        }
+    }
+    Err(GitError {
+        message: "El stash seleccionado ya no existe; actualiza la lista.".into(),
+    })
+}
+fn git_text(repo: &Path, args: &[&str], log: &mut Vec<CommandEntry>) -> Result<String, GitError> {
+    let a = strings(args);
+    let (e, o) = run_git(repo, &a);
+    log.push(e);
+    o.map_err(process_error)
+        .and_then(|o| require_success(o, log.last().unwrap(), "Falló una consulta de Git"))
+        .map(|o| String::from_utf8_lossy(&o.stdout.bytes).trim().to_owned())
+}
+fn validate_integration_ready(repo: &Path, log: &mut Vec<CommandEntry>) -> Result<(), GitError> {
+    if detect_integration(repo, log).is_some() {
+        return Err(GitError {
+            message: "Ya hay una operación de integración en curso.".into(),
+        });
+    }
+    let head = git_text(repo, &["rev-parse", "--verify", "HEAD"], log)?;
+    if head.len() != 40 && head.len() != 64 {
+        return Err(GitError {
+            message: "La operación requiere un commit y una rama local.".into(),
+        });
+    }
+    let branch = git_text(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"], log)?;
+    if branch.is_empty() {
+        return Err(GitError {
+            message: "La operación requiere una rama local.".into(),
+        });
+    }
+    let status = git_text(
+        repo,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        log,
+    )?;
+    if !status.is_empty() {
+        return Err(GitError {
+            message: "La operación requiere un árbol de trabajo limpio.".into(),
+        });
+    }
+    Ok(())
+}
+fn launch_editor(
+    repo: &Path,
+    path: &Path,
+    editor: &Path,
+    log: &mut Vec<CommandEntry>,
+) -> Result<(), GitError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(GitError {
+            message: "La ruta del conflicto debe ser relativa al repositorio.".into(),
+        });
+    }
+    let args = strings(&[
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=all",
+    ]);
+    let (entry, output) = run_git(repo, &args);
+    log.push(entry);
+    let output = output.map_err(process_error).and_then(|captured| {
+        require_success(
+            captured,
+            log.last().unwrap(),
+            "No se pudo verificar el conflicto",
+        )
+    })?;
+    let statuses = parse_status_output(&output.stdout)?;
+    if !statuses
+        .files
+        .iter()
+        .any(|file| file.path == path && file.unmerged)
+    {
+        return Err(GitError {
+            message: "El archivo ya no tiene un conflicto; actualiza el estado.".into(),
+        });
+    }
+    let abs = repo.join(path);
+    if !abs.is_file() {
+        return Err(GitError {
+            message: "El archivo del conflicto ya no existe.".into(),
+        });
+    }
+    let started = SystemTime::now();
+    let t = Instant::now();
+    let mut cmd = Command::new(editor);
+    cmd.arg(&abs).current_dir(repo);
+    let spawn = cmd.spawn();
+    let (status, stderr) = match spawn {
+        Ok(_) => (CommandStatus::Succeeded, None),
+        Err(e) => (CommandStatus::Failed, Some(e.to_string())),
+    };
+    let display = command_display(&editor.to_string_lossy(), &[abs.as_os_str().to_owned()]);
+    log.push(CommandEntry {
+        id: LOG_ID.fetch_add(1, Ordering::Relaxed),
+        command_display: redact_text(&display),
+        cwd: Some(repo.to_path_buf()),
+        started_at: started,
+        duration: t.elapsed(),
+        status,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: stderr.clone().unwrap_or_default(),
+    });
+    stderr.map_or(Ok(()), |e| {
+        Err(GitError {
+            message: format!("No se pudo abrir el editor externo. {e}"),
+        })
+    })
+}
+fn discard_file(
+    repo: &Path,
+    path: &Path,
+    has_head: bool,
+    log: &mut Vec<CommandEntry>,
+) -> Result<(), GitError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(GitError {
+            message: "La ruta del archivo debe ser relativa al repositorio.".into(),
+        });
+    }
+    let args = strings(&[
+        "--literal-pathspecs",
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=all",
+    ]);
+    let (entry, output) = run_git(repo, &args);
+    log.push(entry);
+    let output = output
+        .map_err(process_error)
+        .and_then(|o| require_success(o, log.last().unwrap(), "No se pudo verificar el archivo"))?;
+    let statuses = parse_status_output(&output.stdout)?;
+    let file = statuses
+        .files
+        .iter()
+        .find(|f| f.path == path)
+        .ok_or_else(|| GitError {
+            message: "El archivo ya no tiene cambios; actualiza el estado.".into(),
+        })?;
+    if file.unmerged {
+        return Err(GitError {
+            message: "Resuelve primero el conflicto de este archivo.".into(),
+        });
+    }
+    let head_args = strings(&["rev-parse", "--verify", "--quiet", "HEAD"]);
+    let (head_entry, head_output) = run_git(repo, &head_args);
+    log.push(head_entry);
+    let actual_head = match head_output {
+        Ok(output) if output.status.success() => true,
+        Ok(output) if output.status.code() == Some(1) => false,
+        Ok(output) => {
+            return Err(command_error(
+                "No se pudo verificar HEAD",
+                log.last().unwrap(),
+                &output.stderr,
+            ));
+        }
+        Err(error) => {
+            return Err(GitError {
+                message: format!("No se pudo verificar HEAD. {error}"),
+            });
+        }
+    };
+    if actual_head != has_head {
+        return Err(GitError {
+            message: "El estado de HEAD cambió; actualiza el repositorio antes de descartar."
+                .into(),
+        });
+    }
+    if file.index_status == 'R' {
+        let args: Vec<OsString> = strings(&[
+            "--literal-pathspecs",
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "HEAD",
+        ])
+        .into_iter()
+        .collect();
+        let (entry, output) = run_git(repo, &args);
+        log.push(entry);
+        let output = output.map_err(process_error).and_then(|o| {
+            require_success(o, log.last().unwrap(), "No se pudo verificar el renombre")
+        })?;
+        let fields = output
+            .stdout
+            .bytes
+            .split(|b| *b == 0)
+            .filter(|f| !f.is_empty())
+            .collect::<Vec<_>>();
+        if let Some(original) = rename_source_for_path(&fields, path) {
+            let restore: Vec<OsString> = strings(&[
+                "--literal-pathspecs",
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+            ])
+            .into_iter()
+            .chain([original.as_os_str().to_owned()])
+            .collect();
+            let (entry, output) = run_git(repo, &restore);
+            log.push(entry);
+            successful_mutation(
+                output,
+                log.last().unwrap(),
+                "No se pudo restaurar el nombre original",
+            )?;
+            let remove: Vec<OsString> = strings(&[
+                "--literal-pathspecs",
+                "rm",
+                "--cached",
+                "-f",
+                "--ignore-unmatch",
+                "--",
+            ])
+            .into_iter()
+            .chain([path.as_os_str().to_owned()])
+            .collect();
+            let (entry, output) = run_git(repo, &remove);
+            log.push(entry);
+            successful_mutation(
+                output,
+                log.last().unwrap(),
+                "No se pudo limpiar el renombre",
+            )?;
+            remove_exact_path(&repo.join(path))?;
+            return Ok(());
+        }
+    }
+    let tracked_in_head = if actual_head {
+        let args: Vec<OsString> = strings(&["--literal-pathspecs", "ls-tree", "-z", "HEAD", "--"])
+            .into_iter()
+            .chain([path.as_os_str().to_owned()])
+            .collect();
+        let (entry, output) = run_git(repo, &args);
+        log.push(entry);
+        let output = output
+            .map_err(process_error)
+            .and_then(|o| require_success(o, log.last().unwrap(), "No se pudo verificar HEAD"))?;
+        !output.stdout.bytes.is_empty()
+    } else {
+        false
+    };
+    if tracked_in_head {
+        let args: Vec<OsString> = strings(&[
+            "--literal-pathspecs",
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+        ])
+        .into_iter()
+        .chain([path.as_os_str().to_owned()])
+        .collect();
+        let (entry, output) = run_git(repo, &args);
+        log.push(entry);
+        successful_mutation(
+            output,
+            log.last().unwrap(),
+            "No se pudo restaurar el archivo",
+        )?;
+    } else {
+        let args: Vec<OsString> = strings(&[
+            "--literal-pathspecs",
+            "rm",
+            "--cached",
+            "-f",
+            "--ignore-unmatch",
+            "--",
+        ])
+        .into_iter()
+        .chain([path.as_os_str().to_owned()])
+        .collect();
+        let (entry, output) = run_git(repo, &args);
+        log.push(entry);
+        successful_mutation(output, log.last().unwrap(), "No se pudo limpiar el índice")?;
+        remove_exact_path(&repo.join(path))?;
+    }
+    Ok(())
+}
+
+fn rename_source_for_path(fields: &[&[u8]], selected: &Path) -> Option<PathBuf> {
+    let mut index = 0;
+    while index < fields.len() {
+        let status = fields[index];
+        index += 1;
+        if status.first() == Some(&b'R') {
+            let first = fields.get(index)?;
+            let second = fields.get(index + 1)?;
+            let first_path = super::parsers::path_from_bytes(first);
+            let second_path = super::parsers::path_from_bytes(second);
+            if first_path == selected {
+                return Some(second_path);
+            }
+            if second_path == selected {
+                return Some(first_path);
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+fn remove_exact_path(path: &Path) -> Result<(), GitError> {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    let result = if metadata.file_type().is_symlink() {
+        #[cfg(windows)]
+        {
+            if path.is_dir() {
+                std::fs::remove_dir(path)
+            } else {
+                std::fs::remove_file(path)
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::remove_file(path)
+        }
+    } else if metadata.is_dir() {
+        return Err(GitError {
+            message: "Solo se pueden descartar archivos, no directorios.".into(),
+        });
+    } else {
+        std::fs::remove_file(path)
+    };
+    result.map_err(|e| GitError {
+        message: format!("No se pudo eliminar el archivo seleccionado. {e}"),
+    })
+}
+
 struct CapturedStream {
     bytes: Vec<u8>,
     truncated: bool,
@@ -1895,9 +2668,12 @@ mod tests {
             GitResult::Fetched { .. }
         ));
         assert!(matches!(
-            run(GitOperation::PullFastForward(right.clone()))
-                .result
-                .unwrap(),
+            run(GitOperation::Pull {
+                repository: right.clone(),
+                policy: PullPolicy::FastForwardOnly,
+            })
+            .result
+            .unwrap(),
             GitResult::Pulled { .. }
         ));
 
@@ -1994,5 +2770,475 @@ mod tests {
         let logged = capture_text(&stdout);
         assert!(logged.contains("Salida truncada"));
         assert!(logged.len() <= MAX_CAPTURE_BYTES);
+    }
+
+    #[test]
+    fn stash_oid_survives_selector_changes_and_can_be_applied_or_dropped() {
+        let temp = TempPath::new();
+        let repo = temp.0.as_path();
+        raw_git(repo, &["init", "-q"]);
+        raw_git(repo, &["config", "user.name", "Gitzi Test"]);
+        raw_git(repo, &["config", "user.email", "gitzi@example.test"]);
+        commit(repo, "archivo ñ.txt", "base\n", "base");
+        fs::write(repo.join("archivo ñ.txt"), "cambio\n").unwrap();
+        assert!(matches!(
+            run(GitOperation::CreateStash {
+                repository: repo.into(),
+                message: Some("respaldo".into()),
+                include_untracked: false
+            })
+            .result
+            .unwrap(),
+            GitResult::StashCreated { .. }
+        ));
+        let entries = match run(GitOperation::ListStashes(repo.into())).result.unwrap() {
+            GitResult::StashesListed { stashes, .. } => stashes,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            run(GitOperation::LoadStashDetail {
+                repository: repo.into(),
+                stash_oid: entries[0].oid.clone()
+            })
+            .result
+            .unwrap(),
+            GitResult::StashDetailLoaded { .. }
+        ));
+        fs::write(repo.join("segundo.txt"), "segundo\n").unwrap();
+        assert!(matches!(
+            run(GitOperation::CreateStash {
+                repository: repo.into(),
+                message: None,
+                include_untracked: true
+            })
+            .result
+            .unwrap(),
+            GitResult::StashCreated { .. }
+        ));
+        let newest = match run(GitOperation::ListStashes(repo.into())).result.unwrap() {
+            GitResult::StashesListed { stashes, .. } => {
+                assert_eq!(stashes.len(), 2);
+                stashes[0].clone()
+            }
+            other => panic!("{other:?}"),
+        };
+        let git_oids = raw_git(repo, &["stash", "list", "--format=%H"]);
+        assert_eq!(newest.oid, git_oids.lines().next().unwrap());
+        assert_eq!(entries[0].oid, git_oids.lines().nth(1).unwrap());
+        match run(GitOperation::LoadStashDetail {
+            repository: repo.into(),
+            stash_oid: newest.oid.clone(),
+        })
+        .result
+        .unwrap()
+        {
+            GitResult::StashDetailLoaded { detail, .. } => {
+                assert!(detail.diff.contains("segundo.txt"))
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            run(GitOperation::DropStash {
+                repository: repo.into(),
+                stash_oid: newest.oid
+            })
+            .result
+            .unwrap(),
+            GitResult::StashDropped { .. }
+        ));
+        assert!(matches!(
+            run(GitOperation::ApplyStash {
+                repository: repo.into(),
+                stash_oid: entries[0].oid.clone()
+            })
+            .result
+            .unwrap(),
+            GitResult::StashApplied { .. }
+        ));
+        assert!(matches!(
+            run(GitOperation::DropStash {
+                repository: repo.into(),
+                stash_oid: entries[0].oid.clone()
+            })
+            .result
+            .unwrap(),
+            GitResult::StashDropped { .. }
+        ));
+        assert_eq!(
+            match run(GitOperation::ListStashes(repo.into())).result.unwrap() {
+                GitResult::StashesListed { stashes, .. } => stashes.len(),
+                _ => 99,
+            },
+            0
+        );
+    }
+
+    #[test]
+    fn integration_detection_and_exact_discard_respect_repository_paths() {
+        let temp = TempPath::new();
+        let repo = temp.0.as_path();
+        raw_git(repo, &["init", "-q"]);
+        raw_git(repo, &["config", "core.autocrlf", "false"]);
+        raw_git(repo, &["config", "user.name", "Gitzi Test"]);
+        raw_git(repo, &["config", "user.email", "gitzi@example.test"]);
+        commit(repo, "uno ñ.txt", "base\n", "base");
+        commit(repo, "nombre original.txt", "renombrado\n", "rename seed");
+        raw_git(
+            repo,
+            &["mv", "--", "nombre original.txt", "nombre nuevo.txt"],
+        );
+        fs::write(repo.join("nombre nuevo.txt"), "worktree renombrado\n").unwrap();
+        assert!(matches!(
+            run(GitOperation::DiscardFile {
+                repository: repo.into(),
+                path: "nombre nuevo.txt".into(),
+                has_head: true
+            })
+            .result
+            .unwrap(),
+            GitResult::FileDiscarded { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(repo.join("nombre original.txt")).unwrap(),
+            "renombrado\n"
+        );
+        assert!(!repo.join("nombre nuevo.txt").exists());
+        fs::write(repo.join("uno ñ.txt"), "unstaged\n").unwrap();
+        commit(repo, "dos space.txt", "tracked\n", "second file");
+        fs::write(repo.join("dos space.txt"), "staged\n").unwrap();
+        raw_git(repo, &["add", "--", "dos space.txt"]);
+        fs::write(repo.join("dos space.txt"), "worktree\n").unwrap();
+        assert!(matches!(
+            run(GitOperation::DiscardFile {
+                repository: repo.into(),
+                path: "uno ñ.txt".into(),
+                has_head: true
+            })
+            .result
+            .unwrap(),
+            GitResult::FileDiscarded { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(repo.join("dos space.txt")).unwrap(),
+            "worktree\n"
+        );
+        assert!(raw_git(repo, &["diff", "--cached", "--name-only"]).contains("dos space.txt"));
+        assert!(matches!(
+            run(GitOperation::DiscardFile {
+                repository: repo.into(),
+                path: "dos space.txt".into(),
+                has_head: true
+            })
+            .result
+            .unwrap(),
+            GitResult::FileDiscarded { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(repo.join("dos space.txt")).unwrap(),
+            "tracked\n"
+        );
+        fs::write(repo.join("archivo sin seguimiento.txt"), "descartar\n").unwrap();
+        assert!(matches!(
+            run(GitOperation::DiscardFile {
+                repository: repo.into(),
+                path: "archivo sin seguimiento.txt".into(),
+                has_head: true
+            })
+            .result
+            .unwrap(),
+            GitResult::FileDiscarded { .. }
+        ));
+        assert!(!repo.join("archivo sin seguimiento.txt").exists());
+        fs::write(repo.join("staged nuevo.txt"), "contenido staged\n").unwrap();
+        assert!(matches!(
+            run(GitOperation::StageFile {
+                repository: repo.into(),
+                path: "staged nuevo.txt".into()
+            })
+            .result
+            .unwrap(),
+            GitResult::FileStaged { .. }
+        ));
+        fs::write(
+            repo.join("staged nuevo.txt"),
+            "contenido worktree distinto\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            run(GitOperation::DiscardFile {
+                repository: repo.into(),
+                path: "staged nuevo.txt".into(),
+                has_head: true
+            })
+            .result
+            .unwrap(),
+            GitResult::FileDiscarded { .. }
+        ));
+        assert!(!repo.join("staged nuevo.txt").exists());
+    }
+
+    #[test]
+    fn merge_conflict_can_be_detected_and_aborted_then_revert_succeeds() {
+        let temp = TempPath::new();
+        let repo = temp.0.as_path();
+        raw_git(repo, &["init", "-q", "-b", "main"]);
+        raw_git(repo, &["config", "user.name", "Gitzi Test"]);
+        raw_git(repo, &["config", "user.email", "gitzi@example.test"]);
+        commit(repo, "shared.txt", "base\n", "base");
+        raw_git(repo, &["switch", "-c", "topic"]);
+        commit(repo, "shared.txt", "topic\n", "topic edit");
+        raw_git(repo, &["switch", "main"]);
+        commit(repo, "shared.txt", "main\n", "main edit");
+        let failed_merge = run(GitOperation::MergeBranch {
+            repository: repo.into(),
+            branch: "topic".into(),
+        });
+        assert!(failed_merge.result.is_err());
+        let status = match run(GitOperation::InspectRepository(repo.into()))
+            .result
+            .unwrap()
+        {
+            GitResult::RepositoryInspected { status, .. } => status,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(status.integration, Some(IntegrationKind::Merge));
+        assert!(status.files.iter().any(|file| file.unmerged));
+        assert!(matches!(
+            run(GitOperation::AbortIntegration(repo.into()))
+                .result
+                .unwrap(),
+            GitResult::IntegrationAborted { .. }
+        ));
+        commit(repo, "revert-me.txt", "remove me\n", "revert target");
+        let target = raw_git(repo, &["rev-parse", "HEAD"]);
+        assert!(matches!(
+            run(GitOperation::RevertCommit {
+                repository: repo.into(),
+                commit_id: target.clone()
+            })
+            .result
+            .unwrap(),
+            GitResult::IntegrationCompleted { .. }
+        ));
+        assert!(!repo.join("revert-me.txt").exists());
+        assert_eq!(raw_git(repo, &["rev-parse", "HEAD~1"]), target);
+    }
+
+    #[test]
+    fn rebase_conflict_can_be_detected_and_aborted() {
+        let temp = TempPath::new();
+        let repo = temp.0.as_path();
+        raw_git(repo, &["init", "-q", "-b", "main"]);
+        raw_git(repo, &["config", "user.name", "Gitzi Test"]);
+        raw_git(repo, &["config", "user.email", "gitzi@example.test"]);
+        commit(repo, "shared.txt", "base\n", "base");
+        raw_git(repo, &["switch", "-c", "topic"]);
+        commit(repo, "shared.txt", "topic\n", "topic edit");
+        raw_git(repo, &["switch", "main"]);
+        commit(repo, "shared.txt", "main\n", "main edit");
+        raw_git(repo, &["switch", "topic"]);
+        let failed_rebase = run(GitOperation::RebaseBranch {
+            repository: repo.into(),
+            branch: "main".into(),
+        });
+        assert!(failed_rebase.result.is_err());
+        let status = match run(GitOperation::InspectRepository(repo.into()))
+            .result
+            .unwrap()
+        {
+            GitResult::RepositoryInspected { status, .. } => status,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(status.integration, Some(IntegrationKind::Rebase));
+        assert!(status.files.iter().any(|file| file.unmerged));
+        assert!(matches!(
+            run(GitOperation::AbortIntegration(repo.into()))
+                .result
+                .unwrap(),
+            GitResult::IntegrationAborted { .. }
+        ));
+        assert_eq!(
+            raw_git(repo, &["rev-parse", "HEAD"]),
+            raw_git(repo, &["rev-parse", "topic"])
+        );
+    }
+
+    #[test]
+    fn discard_works_in_repository_without_head() {
+        let temp = TempPath::new();
+        let repo = temp.0.as_path();
+        raw_git(repo, &["init", "-q"]);
+        fs::write(repo.join("vacío ñ.txt"), "sin commit\n").unwrap();
+        raw_git(repo, &["add", "--", "vacío ñ.txt"]);
+        assert!(matches!(
+            run(GitOperation::DiscardFile {
+                repository: repo.into(),
+                path: "vacío ñ.txt".into(),
+                has_head: false
+            })
+            .result
+            .unwrap(),
+            GitResult::FileDiscarded { .. }
+        ));
+        assert!(!repo.join("vacío ñ.txt").exists());
+        assert!(raw_git(repo, &["ls-files"]).is_empty());
+    }
+
+    #[test]
+    fn resolved_merge_conflict_can_be_continued() {
+        let temp = TempPath::new();
+        let repo = temp.0.as_path();
+        raw_git(repo, &["init", "-q", "-b", "main"]);
+        raw_git(repo, &["config", "user.name", "Gitzi Test"]);
+        raw_git(repo, &["config", "user.email", "gitzi@example.test"]);
+        raw_git(repo, &["config", "core.editor", "echo"]);
+        commit(repo, "shared.txt", "base\n", "base");
+        raw_git(repo, &["switch", "-c", "topic"]);
+        commit(repo, "shared.txt", "topic\n", "topic edit");
+        raw_git(repo, &["switch", "main"]);
+        commit(repo, "shared.txt", "main\n", "main edit");
+        assert!(
+            run(GitOperation::MergeBranch {
+                repository: repo.into(),
+                branch: "topic".into()
+            })
+            .result
+            .is_err()
+        );
+        let editor = std::env::current_exe().unwrap();
+        let opened = run(GitOperation::OpenConflictFile {
+            repository: repo.into(),
+            path: "shared.txt".into(),
+            editor: editor.clone(),
+        });
+        assert!(matches!(
+            opened.result.unwrap(),
+            GitResult::ExternalFileOpened { .. }
+        ));
+        assert!(
+            opened
+                .commands
+                .last()
+                .unwrap()
+                .command_display
+                .contains(&editor.to_string_lossy().to_string())
+        );
+        fs::write(repo.join("shared.txt"), "resolved\n").unwrap();
+        assert!(matches!(
+            run(GitOperation::StageFile {
+                repository: repo.into(),
+                path: "shared.txt".into()
+            })
+            .result
+            .unwrap(),
+            GitResult::FileStaged { .. }
+        ));
+        assert!(matches!(
+            run(GitOperation::ContinueIntegration(repo.into()))
+                .result
+                .unwrap(),
+            GitResult::IntegrationContinued { .. }
+        ));
+        let status = match run(GitOperation::InspectRepository(repo.into()))
+            .result
+            .unwrap()
+        {
+            GitResult::RepositoryInspected { status, .. } => status,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(status.integration, None);
+        assert!(!status.files.iter().any(|file| file.unmerged));
+    }
+
+    #[test]
+    fn branch_delete_rejects_current_and_unmerged_branch_without_force() {
+        let temp = TempPath::new();
+        let repo = temp.0.as_path();
+        raw_git(repo, &["init", "-q", "-b", "main"]);
+        raw_git(repo, &["config", "user.name", "Gitzi Test"]);
+        raw_git(repo, &["config", "user.email", "gitzi@example.test"]);
+        commit(repo, "base.txt", "base\n", "base");
+        raw_git(repo, &["switch", "-c", "topic"]);
+        commit(repo, "topic.txt", "not merged\n", "topic");
+        raw_git(repo, &["switch", "main"]);
+        let current = run(GitOperation::DeleteBranch {
+            repository: repo.into(),
+            name: "main".into(),
+        });
+        assert!(current.result.is_err());
+        let unmerged = run(GitOperation::DeleteBranch {
+            repository: repo.into(),
+            name: "topic".into(),
+        });
+        assert!(unmerged.result.is_err());
+        assert!(raw_git(repo, &["branch", "--list", "topic"]).contains("topic"));
+        assert!(
+            unmerged
+                .commands
+                .last()
+                .unwrap()
+                .command_display
+                .contains("branch -d")
+        );
+        assert!(
+            !unmerged
+                .commands
+                .last()
+                .unwrap()
+                .command_display
+                .contains("-D")
+        );
+    }
+
+    #[test]
+    fn pull_merge_conflict_keeps_the_integration_inspectable() {
+        let temp = TempPath::new();
+        let root = temp.0.as_path();
+        let bare = root.join("remote.git");
+        let seed = root.join("seed");
+        let local = root.join("clone local");
+        fs::create_dir_all(&bare).unwrap();
+        assert!(
+            TestCommand::new("git")
+                .args(["init", "--bare", bare.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::create_dir_all(&seed).unwrap();
+        raw_git(&seed, &["init", "-q", "-b", "main"]);
+        raw_git(&seed, &["config", "user.name", "Gitzi Test"]);
+        raw_git(&seed, &["config", "user.email", "gitzi@example.test"]);
+        commit(&seed, "shared.txt", "base\n", "base");
+        raw_git(&seed, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        raw_git(&seed, &["push", "--set-upstream", "origin", "main"]);
+        raw_git(&bare, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        raw_git(
+            root,
+            &["clone", bare.to_str().unwrap(), local.to_str().unwrap()],
+        );
+        raw_git(&local, &["config", "user.name", "Gitzi Test"]);
+        raw_git(&local, &["config", "user.email", "gitzi@example.test"]);
+        commit(&local, "shared.txt", "local\n", "local change");
+        commit(&seed, "shared.txt", "remote\n", "remote change");
+        raw_git(&seed, &["push"]);
+        let pull = run(GitOperation::Pull {
+            repository: local.clone(),
+            policy: PullPolicy::Merge,
+        });
+        assert!(pull.result.is_err());
+        let status = match run(GitOperation::InspectRepository(local.clone()))
+            .result
+            .unwrap()
+        {
+            GitResult::RepositoryInspected { status, .. } => status,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(status.integration, Some(IntegrationKind::Merge));
+        assert!(matches!(
+            run(GitOperation::AbortIntegration(local)).result.unwrap(),
+            GitResult::IntegrationAborted { .. }
+        ));
     }
 }

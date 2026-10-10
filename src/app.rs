@@ -27,9 +27,12 @@ pub struct GitziApp {
 
 impl GitziApp {
     pub fn new(_creation_context: &eframe::CreationContext<'_>) -> Self {
+        let preferences = settings::load_preferences();
         let mut app = Self {
             snapshot: AppSnapshot {
                 recent_repositories: settings::load_recent_repositories(),
+                pull_policy: preferences.pull_policy,
+                external_editor: preferences.external_editor,
                 ..Default::default()
             },
             worker: GitWorker::spawn(),
@@ -46,9 +49,24 @@ impl GitziApp {
     fn submit(&mut self, operation: GitOperation, generation: u64) {
         let is_detection = matches!(&operation, GitOperation::DetectGit);
         let refresh_after_error = match &operation {
-            GitOperation::Fetch(repository) | GitOperation::PullFastForward(repository) => {
-                Some(repository.clone())
+            GitOperation::Fetch(repository) => Some(repository.clone()),
+            GitOperation::Pull { repository, .. }
+            | GitOperation::CreateStash { repository, .. }
+            | GitOperation::ApplyStash {
+                repository,
+                stash_oid: _,
             }
+            | GitOperation::DropStash {
+                repository,
+                stash_oid: _,
+            }
+            | GitOperation::MergeBranch { repository, .. }
+            | GitOperation::RebaseBranch { repository, .. }
+            | GitOperation::RevertCommit { repository, .. }
+            | GitOperation::ContinueIntegration(repository)
+            | GitOperation::AbortIntegration(repository)
+            | GitOperation::DiscardFile { repository, .. }
+            | GitOperation::DeleteBranch { repository, .. } => Some(repository.clone()),
             GitOperation::PublishBranch { repository, .. } => Some(repository.clone()),
             _ => None,
         };
@@ -271,6 +289,23 @@ impl GitziApp {
             | UiAction::CompareReferences { .. }) => {
                 self.handle_collaboration_action(action);
             }
+            action @ (UiAction::CreateStash { .. }
+            | UiAction::LoadStashDetail(_)
+            | UiAction::ApplyStash(_)
+            | UiAction::DropStash(_)
+            | UiAction::MergeBranch(_)
+            | UiAction::RebaseBranch(_)
+            | UiAction::RevertCommit(_)
+            | UiAction::OpenConflictFile(_)
+            | UiAction::ContinueIntegration
+            | UiAction::AbortIntegration
+            | UiAction::DiscardFile(_)
+            | UiAction::DeleteBranch(_)) => {
+                self.handle_recovery_action(action);
+            }
+            action @ (UiAction::SetPullPolicy(_) | UiAction::SetExternalEditor(_)) => {
+                self.handle_preference_action(action);
+            }
         }
     }
 
@@ -298,7 +333,10 @@ impl GitziApp {
                     );
                     return;
                 }
-                GitOperation::PullFastForward(repository)
+                GitOperation::Pull {
+                    repository,
+                    policy: self.snapshot.pull_policy,
+                }
             }
             UiAction::Push => {
                 let Some(upstream) = status.upstream.clone() else {
@@ -456,6 +494,234 @@ impl GitziApp {
         self.submit(operation, self.generation);
     }
 
+    fn handle_preference_action(&mut self, action: UiAction) {
+        let mut preferences = settings::Preferences {
+            pull_policy: self.snapshot.pull_policy,
+            external_editor: self.snapshot.external_editor.clone(),
+        };
+        match action {
+            UiAction::SetPullPolicy(policy) => preferences.pull_policy = policy,
+            UiAction::SetExternalEditor(editor) => {
+                if editor
+                    .as_ref()
+                    .is_some_and(|path| path.as_os_str().is_empty())
+                {
+                    self.snapshot.error_message = Some("Indica la ruta del editor externo.".into());
+                    return;
+                }
+                preferences.external_editor = editor;
+            }
+            _ => return,
+        }
+        match settings::save_preferences(&preferences) {
+            Ok(()) => {
+                self.snapshot.pull_policy = preferences.pull_policy;
+                self.snapshot.external_editor = preferences.external_editor;
+                self.snapshot.error_message = None;
+            }
+            Err(error) => self.snapshot.error_message = Some(error),
+        }
+    }
+
+    fn handle_recovery_action(&mut self, action: UiAction) {
+        let Some(repository) = self.snapshot.active_repo.clone() else {
+            return;
+        };
+        let Some(status) = self.snapshot.repository.clone() else {
+            return;
+        };
+
+        let is_merge = matches!(&action, UiAction::MergeBranch(_));
+        let operation = match action {
+            UiAction::CreateStash {
+                message,
+                include_untracked,
+            } => {
+                if status.files.is_empty() {
+                    self.snapshot.error_message =
+                        Some("No hay cambios para guardar en un stash.".into());
+                    return;
+                }
+                GitOperation::CreateStash {
+                    repository,
+                    message,
+                    include_untracked,
+                }
+            }
+            UiAction::LoadStashDetail(oid) => {
+                if !self.snapshot.stashes.iter().any(|stash| stash.oid == oid) {
+                    self.snapshot.error_message =
+                        Some("Ese stash ya no está disponible. Actualiza.".into());
+                    return;
+                }
+                self.snapshot.stash_detail = None;
+                GitOperation::LoadStashDetail {
+                    repository,
+                    stash_oid: oid,
+                }
+            }
+            UiAction::ApplyStash(oid) => {
+                if !self.snapshot.stashes.iter().any(|stash| stash.oid == oid) {
+                    self.snapshot.error_message =
+                        Some("Ese stash ya no está disponible. Actualiza.".into());
+                    return;
+                }
+                GitOperation::ApplyStash {
+                    repository,
+                    stash_oid: oid,
+                }
+            }
+            UiAction::DropStash(oid) => {
+                if !self.snapshot.stashes.iter().any(|stash| stash.oid == oid) {
+                    self.snapshot.error_message =
+                        Some("Ese stash ya no está disponible. Actualiza.".into());
+                    return;
+                }
+                GitOperation::DropStash {
+                    repository,
+                    stash_oid: oid,
+                }
+            }
+            UiAction::MergeBranch(branch) | UiAction::RebaseBranch(branch) => {
+                if status.has_head != Some(true) || status.branch.is_empty() {
+                    self.snapshot.error_message =
+                        Some("La integración requiere una rama actual con commit.".into());
+                    return;
+                }
+                if status.integration.is_some() || !status.files.is_empty() {
+                    self.snapshot.error_message = Some(
+                        "Guarda o resuelve los cambios antes de iniciar otra integración.".into(),
+                    );
+                    return;
+                }
+                let valid_target = self.snapshot.branches.iter().any(|item| {
+                    item.kind == BranchKind::Local && item.name == branch && !item.current
+                });
+                if !valid_target {
+                    self.snapshot.error_message =
+                        Some("Elige una rama local existente que no sea la actual.".into());
+                    return;
+                }
+                if is_merge {
+                    GitOperation::MergeBranch { repository, branch }
+                } else {
+                    GitOperation::RebaseBranch { repository, branch }
+                }
+            }
+            UiAction::RevertCommit(commit_id) => {
+                if status.has_head != Some(true) || status.branch.is_empty() {
+                    self.snapshot.error_message =
+                        Some("Revertir requiere una rama actual con commit.".into());
+                    return;
+                }
+                if status.integration.is_some() || !status.files.is_empty() {
+                    self.snapshot.error_message =
+                        Some("Guarda o resuelve los cambios antes de revertir.".into());
+                    return;
+                }
+                if !self
+                    .snapshot
+                    .history
+                    .iter()
+                    .any(|commit| commit.id == commit_id)
+                {
+                    self.snapshot.error_message =
+                        Some("Ese commit ya no está en el historial cargado.".into());
+                    return;
+                }
+                GitOperation::RevertCommit {
+                    repository,
+                    commit_id,
+                }
+            }
+            UiAction::OpenConflictFile(path) => {
+                let conflicted = self.file_status(&path).is_some_and(is_unmerged);
+                if !conflicted {
+                    self.snapshot.error_message =
+                        Some("El archivo ya no tiene un conflicto activo.".into());
+                    return;
+                }
+                let Some(editor) = self.snapshot.external_editor.clone() else {
+                    self.snapshot.error_message =
+                        Some("Configura un editor externo en Preferencias.".into());
+                    return;
+                };
+                GitOperation::OpenConflictFile {
+                    repository,
+                    path,
+                    editor,
+                }
+            }
+            UiAction::ContinueIntegration => {
+                if status.integration.is_none() {
+                    self.snapshot.error_message =
+                        Some("No hay una integración en curso para continuar.".into());
+                    return;
+                }
+                if status.files.iter().any(is_unmerged) {
+                    self.snapshot.error_message = Some(
+                        "Resuelve y prepara todos los archivos en conflicto antes de continuar."
+                            .into(),
+                    );
+                    return;
+                }
+                GitOperation::ContinueIntegration(repository)
+            }
+            UiAction::AbortIntegration => {
+                if status.integration.is_none() {
+                    self.snapshot.error_message =
+                        Some("No hay una integración en curso para abortar.".into());
+                    return;
+                }
+                GitOperation::AbortIntegration(repository)
+            }
+            UiAction::DiscardFile(path) => {
+                let Some(file) = status.files.iter().find(|file| file.path == path) else {
+                    self.snapshot.error_message =
+                        Some("El archivo ya no tiene cambios. Actualiza.".into());
+                    return;
+                };
+                if status.integration.is_some() || is_unmerged(file) {
+                    self.snapshot.error_message =
+                        Some("Resuelve o aborta la integración antes de descartar cambios.".into());
+                    return;
+                }
+                let Some(has_head) = status.has_head else {
+                    self.snapshot.error_message = Some(
+                        "No se pudo determinar si el repositorio tiene commits. Actualiza.".into(),
+                    );
+                    return;
+                };
+                GitOperation::DiscardFile {
+                    repository,
+                    path,
+                    has_head,
+                }
+            }
+            UiAction::DeleteBranch(name) => {
+                let Some(branch) = self
+                    .snapshot
+                    .branches
+                    .iter()
+                    .find(|item| item.kind == BranchKind::Local && item.name == name)
+                else {
+                    self.snapshot.error_message =
+                        Some("La rama local ya no existe. Actualiza.".into());
+                    return;
+                };
+                if branch.current || name == status.branch {
+                    self.snapshot.error_message =
+                        Some("No se puede eliminar la rama actual.".into());
+                    return;
+                }
+                GitOperation::DeleteBranch { repository, name }
+            }
+            _ => return,
+        };
+        self.snapshot.file_diff = None;
+        self.submit(operation, self.generation);
+    }
+
     fn file_status(&self, path: &std::path::Path) -> Option<&FileStatus> {
         self.snapshot
             .repository
@@ -504,12 +770,13 @@ impl GitziApp {
                     );
                     self.submit_preserving_error(
                         GitOperation::LoadHistory {
-                            repository: path,
+                            repository: path.clone(),
                             offset: 0,
                             limit: 30,
                         },
                         self.generation,
                     );
+                    self.submit_preserving_error(GitOperation::ListStashes(path), self.generation);
                 }
                 Ok(GitResult::RepositoryInitialized { path })
                 | Ok(GitResult::RepositoryCloned { path }) => {
@@ -559,6 +826,30 @@ impl GitziApp {
                     }
                     self.snapshot.history_has_more = has_more;
                 }
+                Ok(GitResult::StashesListed {
+                    repository,
+                    stashes,
+                }) if self.snapshot.active_repo.as_ref() == Some(&repository) => {
+                    if self
+                        .snapshot
+                        .stash_detail
+                        .as_ref()
+                        .is_some_and(|detail| !stashes.iter().any(|stash| stash.oid == detail.oid))
+                    {
+                        self.snapshot.stash_detail = None;
+                    }
+                    self.snapshot.stashes = stashes;
+                }
+                Ok(GitResult::StashDetailLoaded { repository, detail })
+                    if self.snapshot.active_repo.as_ref() == Some(&repository)
+                        && self
+                            .snapshot
+                            .stashes
+                            .iter()
+                            .any(|stash| stash.oid == detail.oid) =>
+                {
+                    self.snapshot.stash_detail = Some(detail);
+                }
                 Ok(GitResult::CommitLoaded { repository, detail })
                     if self.snapshot.active_repo.as_ref() == Some(&repository) =>
                 {
@@ -579,6 +870,17 @@ impl GitziApp {
                 | Ok(GitResult::BranchPublished { repository }) => {
                     self.refresh_after_mutation(repository);
                 }
+                Ok(GitResult::StashCreated { repository })
+                | Ok(GitResult::StashApplied { repository })
+                | Ok(GitResult::StashDropped { repository })
+                | Ok(GitResult::IntegrationCompleted { repository })
+                | Ok(GitResult::IntegrationContinued { repository })
+                | Ok(GitResult::IntegrationAborted { repository })
+                | Ok(GitResult::FileDiscarded { repository })
+                | Ok(GitResult::BranchDeleted { repository }) => {
+                    self.refresh_after_mutation(repository);
+                }
+                Ok(GitResult::ExternalFileOpened { .. }) => {}
                 Err(error) => {
                     self.snapshot.git_checked = true;
                     self.snapshot.error_message = Some(error.message);
@@ -617,6 +919,8 @@ impl GitziApp {
         self.snapshot.history_has_more = false;
         self.snapshot.commit_detail = None;
         self.snapshot.ref_comparison = None;
+        self.snapshot.stashes.clear();
+        self.snapshot.stash_detail = None;
     }
 
     fn clear_repository_view(&mut self) {

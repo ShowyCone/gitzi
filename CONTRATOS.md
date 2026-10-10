@@ -1,6 +1,6 @@
 # Contratos compartidos
 
-Estado: contratos compartidos para Entregas 1, 2 y 3. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/domain.rs`, `src/app.rs`, `src/settings.rs` y este documento pertenecen al orquestador.
+Estado: contratos compartidos para Entregas 1–4. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/domain.rs`, `src/app.rs`, `src/settings.rs` y este documento pertenecen al orquestador.
 
 ## Límites
 
@@ -121,3 +121,34 @@ Se fija eframe `0.36.2` tras verificar la documentación oficial. Se desactivan 
 - Valida acciones usando repo, rama local actual y listas vigentes; publicar/push exigen una rama local actual con commit. Un cambio de repo invalida listas, historial, detalle y comparación.
 - Tras crear/cambiar rama, publicar, configurar upstream, fetch o pull, refresca estado de repo y referencias locales. Tras push refresca contadores y el estado de la rama. La paginación añade resultados solo para el repositorio y offset actuales. La UI solo presenta una comparación mientras coincide con las dos referencias seleccionadas.
 - El registro conserva argv y salidas reales, aplica la redacción existente y muestra los errores del helper de credenciales cancelado/fallido. No se persiste salida ni secreto.
+
+## Entrega 4: integración y recuperación
+
+### Dominio y acciones (`src/domain.rs`, propiedad del orquestador)
+
+- `IntegrationKind::{Merge, Rebase, Revert}` identifica la operación en curso en `RepositoryStatus.integration`. Los conflictos se derivan de los archivos porcelain no fusionados; no se mantienen dos fuentes de estado.
+- `PullPolicy::{FastForwardOnly, Merge, Rebase}` tiene `FastForwardOnly` como valor predeterminado. Se persiste en preferencias de Gitzi, no en la configuración global de Git.
+- `StashEntry { oid, selector, message, created_at }` y `StashDetail { oid, diff, truncated }` representan la lista e inspección bajo demanda. Acciones mutantes llevan OID, no un `stash@{n}` obsoleto; el motor vuelve a resolverlo antes de operar.
+- `AppSnapshot` añade `stashes`, `stash_detail`, `pull_policy` y `external_editor`. `external_editor` es una ruta opcional al ejecutable, persistida sin argumentos de shell.
+- `settings::Preferences { pull_policy, external_editor }` tiene `load_preferences() -> Preferences` y `save_preferences(&Preferences) -> Result<(), String>`. Se almacena en `preferences.txt` junto a recientes, con lectura tolerante y versión explícita; no reescribe `recent-repositories.txt`.
+- `UiAction` añade `SetPullPolicy(PullPolicy)`, `SetExternalEditor(Option<PathBuf>)`, `OpenConflictFile(PathBuf)`, `CreateStash { message: Option<String>, include_untracked: bool }`, `LoadStashDetail(String)`, `ApplyStash(String)`, `DropStash(String)`, `MergeBranch(String)`, `RebaseBranch(String)`, `RevertCommit(String)`, `ContinueIntegration`, `AbortIntegration`, `DiscardFile(PathBuf)` y `DeleteBranch(String)`.
+
+### Motor Git (`src/git/**`, propiedad T4-GIT)
+
+- Sustituye `PullFastForward(PathBuf)` por `Pull { repository, policy }`. Ejecuta `pull --ff-only`, `pull --no-rebase` o `pull --rebase` según la preferencia cargada; no cambia configuración persistente de Git.
+- Añade `ListStashes(PathBuf)`, `CreateStash { repository, message, include_untracked }`, `LoadStashDetail { repository, stash_oid }`, `ApplyStash { repository, stash_oid }`, `DropStash { repository, stash_oid }`, `MergeBranch { repository, branch }`, `RebaseBranch { repository, branch }`, `RevertCommit { repository, commit_id }`, `ContinueIntegration(PathBuf)`, `AbortIntegration(PathBuf)`, `DiscardFile { repository, path, has_head }`, `DeleteBranch { repository, name }` y `OpenConflictFile { repository, path, editor }`.
+- Añade `StashesListed { repository, stashes }`, `StashCreated { repository }`, `StashDetailLoaded { repository, detail }`, `StashApplied { repository }`, `StashDropped { repository }`, `IntegrationCompleted { repository }`, `IntegrationContinued { repository }`, `IntegrationAborted { repository }`, `FileDiscarded { repository }`, `BranchDeleted { repository }` y `ExternalFileOpened { repository }`. Toda respuesta conserva `id`, `generation`, registro real y errores redactados.
+- Inspecciona `MERGE_HEAD`, `rebase-merge`, `rebase-apply` y `REVERT_HEAD` mediante rutas que Git resuelve; prioridad rebase, merge y revert. No deduce una operación activa únicamente del texto de error.
+- `ContinueIntegration` y `AbortIntegration` solo ejecutan el subcomando que corresponda a la operación detectada y la vuelven a validar justo antes. No reintentan ni abortan automáticamente.
+- Rebase/Merge/Revert requieren una rama local con commit, estado limpio y ninguna integración en curso. No se fuerza ninguna operación. Merge y Revert conservan hooks y firma; Pull con Merge/Rebase puede terminar en conflicto y devuelve estado real.
+- Crear stash conserva cambios staged y unstaged; `include_untracked` controla archivos untracked. Aplicar no elimina el stash. Eliminar resuelve el OID seleccionado al selector vigente y usa `git stash drop`, sin borrar reflogs directamente.
+- `DiscardFile` elimina únicamente cambios del archivo confirmado por el usuario: restaura tracked desde HEAD en índice y árbol de trabajo; elimina untracked por pathspec literal; en un repo sin HEAD limpia la entrada del índice y el archivo exacto. Rechaza conflictos. `DeleteBranch` usa borrado no forzado y rechaza rama actual/no fusionada.
+- `OpenConflictFile` inicia el ejecutable configurado mediante `Command` con argumentos separados y ruta absoluta del archivo; no usa shell ni interpreta comandos del repositorio. Registra el lanzamiento y devuelve error visible si no puede abrirlo.
+- Las pruebas mutantes usan repositorios temporales y remoto bare. Cubren stash, merge/rebase/revert, conflictos, continuación/aborto, rutas literales, borrado confirmado y estados parciales.
+
+### Integración e interfaz (`src/app.rs` y `src/ui/**`)
+
+- Tras inspeccionar y después de mutaciones/refrescos, la app carga estado de operación y lista de stashes. Tras error de Pull, stash apply, merge, rebase, revert, continuar o abortar, inspecciona de nuevo y conserva el error original.
+- StageFile en un conflicto es la vía para marcar ese archivo resuelto. Continuar se habilita cuando no quedan archivos sin resolver; Abort se limita a una integración detectada.
+- La UI muestra política Pull persistida, stash, integración/conflictos, editor externo y confirmaciones que identifican archivo, stash o rama. Operaciones que borran trabajo o referencias requieren confirmar en un segundo paso; branch delete nunca usa force.
+- Selecciones y resultados de stash/detalle se invalidan al cambiar de repo, refrescar o mutar. Los datos de la UI nunca sustituyen la validación de ramas, OID o conflictos que hace el motor.

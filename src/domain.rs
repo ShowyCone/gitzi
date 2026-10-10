@@ -11,7 +11,23 @@ pub struct RepositoryStatus {
     pub behind: u32,
     pub last_fetch_at: Option<SystemTime>,
     pub has_head: Option<bool>,
+    pub integration: Option<IntegrationKind>,
     pub files: Vec<FileStatus>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegrationKind {
+    Merge,
+    Rebase,
+    Revert,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PullPolicy {
+    #[default]
+    FastForwardOnly,
+    Merge,
+    Rebase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +76,21 @@ pub struct RefComparison {
     pub target_ref: String,
     pub commits_ahead: u32,
     pub commits_behind: u32,
+    pub diff: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StashEntry {
+    pub oid: String,
+    pub selector: String,
+    pub message: String,
+    pub created_at: SystemTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StashDetail {
+    pub oid: String,
     pub diff: String,
     pub truncated: bool,
 }
@@ -125,6 +156,10 @@ pub struct AppSnapshot {
     pub history_has_more: bool,
     pub commit_detail: Option<CommitDetail>,
     pub ref_comparison: Option<RefComparison>,
+    pub stashes: Vec<StashEntry>,
+    pub stash_detail: Option<StashDetail>,
+    pub pull_policy: PullPolicy,
+    pub external_editor: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,4 +194,21 @@ pub enum UiAction {
         base_ref: String,
         target_ref: String,
     },
+    SetPullPolicy(PullPolicy),
+    SetExternalEditor(Option<PathBuf>),
+    OpenConflictFile(PathBuf),
+    CreateStash {
+        message: Option<String>,
+        include_untracked: bool,
+    },
+    LoadStashDetail(String),
+    ApplyStash(String),
+    DropStash(String),
+    MergeBranch(String),
+    RebaseBranch(String),
+    RevertCommit(String),
+    ContinueIntegration,
+    AbortIntegration,
+    DiscardFile(PathBuf),
+    DeleteBranch(String),
 }
