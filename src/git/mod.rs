@@ -5,6 +5,10 @@ mod runner;
 
 use std::{
     sync::mpsc::{self, Receiver, SyncSender, TrySendError},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
@@ -16,19 +20,72 @@ const REQUEST_QUEUE_CAPACITY: usize = 32;
 pub struct GitWorker {
     requests: SyncSender<GitRequest>,
     responses: Receiver<GitResponse>,
+    shutdown: Arc<AtomicBool>,
+    login_watchers: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
 }
 
 impl GitWorker {
     pub fn spawn() -> GitWorker {
-        let (request_tx, request_rx) = mpsc::sync_channel(REQUEST_QUEUE_CAPACITY);
-        let (response_tx, response_rx) = mpsc::channel();
+        let (request_tx, request_rx) = mpsc::sync_channel::<GitRequest>(REQUEST_QUEUE_CAPACITY);
+        let (response_tx, response_rx) = mpsc::channel::<GitResponse>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let login_watchers = Arc::new(Mutex::new(Vec::new()));
+        let worker_login_watchers = Arc::clone(&login_watchers);
         thread::Builder::new()
             .name("gitzi-git-worker".into())
             .spawn(move || {
                 while let Ok(request) = request_rx.recv() {
-                    let response = runner::handle_request(request);
+                    let is_login =
+                        matches!(&request.operation, GitOperation::StartGitHubBrowserLogin);
+                    let mut watcher_handles = if is_login {
+                        Some(
+                            worker_login_watchers
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        )
+                    } else {
+                        None
+                    };
+                    if worker_shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let (response, login_watcher) =
+                        runner::handle_request_with_monitor(request, Arc::clone(&worker_shutdown));
                     if response_tx.send(response).is_err() {
                         break;
+                    }
+                    if let Some(login_watcher) = login_watcher {
+                        let login_responses = response_tx.clone();
+                        let watcher = Arc::new(Mutex::new(Some(login_watcher)));
+                        let thread_watcher = Arc::clone(&watcher);
+                        let monitor = thread::Builder::new()
+                            .name("gitzi-github-login-watcher".into())
+                            .spawn(move || {
+                                let login_watcher = thread_watcher
+                                    .lock()
+                                    .ok()
+                                    .and_then(|mut watcher| watcher.take());
+                                if let Some(login_watcher) = login_watcher {
+                                    let response = login_watcher.wait_for_completion();
+                                    let _ = login_responses.send(response);
+                                }
+                            });
+                        match monitor {
+                            Ok(handle) => {
+                                if let Some(handles) = watcher_handles.as_mut() {
+                                    handles.push(handle);
+                                }
+                            }
+                            Err(error) => {
+                                let login_watcher =
+                                    watcher.lock().ok().and_then(|mut watcher| watcher.take());
+                                if let Some(login_watcher) = login_watcher {
+                                    let response = login_watcher.monitor_start_failed(error);
+                                    let _ = response_tx.send(response);
+                                }
+                            }
+                        }
                     }
                 }
             })
@@ -36,6 +93,8 @@ impl GitWorker {
         GitWorker {
             requests: request_tx,
             responses: response_rx,
+            shutdown,
+            login_watchers,
         }
     }
 
@@ -54,6 +113,20 @@ impl GitWorker {
 
     pub fn try_recv(&self) -> Option<GitResponse> {
         self.responses.try_recv().ok()
+    }
+}
+
+impl Drop for GitWorker {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        let watcher_handles = self
+            .login_watchers
+            .lock()
+            .map(|mut handles| std::mem::take(&mut *handles))
+            .unwrap_or_default();
+        for handle in watcher_handles {
+            let _ = handle.join();
+        }
     }
 }
 

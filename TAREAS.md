@@ -71,3 +71,16 @@ Contrato publicado en `CONTRATOS.md` antes de delegar. El orquestador posee domi
 | T7-VERIFY | Agente verificador | Revisión independiente integrada | Sin cambios de producción | T7-APP/GIT/UI integrados | Revisión sin defectos confirmados restantes; fmt, Clippy, 33 pruebas y build release Windows pasan; GUI visual/Linux/login real/red se declaran no verificados | aceptada |
 
 La actualización T7 queda cerrada en Windows tras revisión independiente. La creación de recursos remotos solo ocurre al usar y confirmar el flujo dentro de Gitzi; no se creó ningún repositorio durante esta entrega. El login, la publicación real, la revisión visual y Linux quedan pendientes de verificarse en el equipo/cuenta del usuario.
+
+## Actualización solicitada T8 — UX, diálogo nativo, terminal integrada y login sin consola
+
+Contrato T8 publicado en `CONTRATOS.md` antes de delegar. El orquestador posee Cargo, dominio, coordinación, entrypoint y documentos; los agentes no comparten archivos de escritura.
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T8-APP | Orquestador | Panel inferior persistente, contrato compartido, ventana 980×660 y documentación | `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/app.rs`, `src/domain.rs`, documentos raíz | Contrato T8 en `CONTRATOS.md`; API UI definida antes de delegar | Ventana fija; selector de carpetas nativo disponible a UI; consola fija abajo; app sigue sin bloquear egui; docs distinguen navegador externo de terminal y preservan configuración Git global | aceptada |
+| T8-UI | Agente de interfaz | Pulido visual/targets de botones, selectores de carpeta y transcript terminal | Solo `src/ui/**` | `rfd = 0.17.2` bloqueado (`xdg-portal`, `wayland`); contrato T8 en `CONTRATOS.md`; API `render_terminal(ui, state, snapshot)` acordada | Selector para abrir/init y destino clone; botón GitHub “Iniciar sesión”; terminal legible y copiable sin pestaña/cards; conserva flujos anteriores, foco y estados | aceptada |
+| T8-GIT | Agente de motor | Inicio de sesión web de `gh` sin consola externa | Solo `src/git/**` | Contrato T8 en `CONTRATOS.md`; `CommandStatus::Running` y resultado final acordados por T8-APP | `gh auth login --hostname github.com --web --clipboard`, sin shell ni consola, stdio aislado; no token ni mutación silenciosa de configuración Git; login monitorizado/cancelado al cerrar; pruebas sin red/cuenta | aceptada |
+| T8-VERIFY | Agente de verificación | Revisión independiente del flujo integrado T8 | Sin cambios de producción | T8-APP/UI/GIT integrados por el orquestador | Revisar diff/contratos y confirmar cierre del watcher/carreras; fmt, Clippy y pruebas/build Windows pasan; sin login real ni operaciones remotas | aceptada |
+
+La actualización T8 queda cerrada tras verificación integrada Windows y revisión independiente sin bloqueos. La GUI visual, Linux, Actions remotas, autenticación real y publicación contra una cuenta siguen pendientes por entorno/credenciales; no se usó una cuenta ni se añadió un remoto durante esta entrega.

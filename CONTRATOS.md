@@ -90,6 +90,30 @@ Estado: contratos compartidos de Entregas 1–5 y de la actualización T6 descri
 - El registro se copia desde `CommandEntry::command_display`; el directorio de trabajo se muestra separado. No se crean comandos a partir de botones.
 - Sin datos de repositorio ficticios ni acciones presentadas como funcionales que no lo sean.
 
+## Actualización T8: UX compacta, terminal integrada y login sin consola
+
+### Dominio y coordinación (propiedad del orquestador)
+
+- Se conservan `AppSnapshot.command_log`, `CommandEntry`, `GitHubAuthStatus::LoginStarted` y `UiAction::StartGitHubBrowserLogin`. Se añade `CommandStatus::Running` y `GitResult::GitHubLoginFinished { status }` para reflejar el ciclo real del proceso sin guardar nuevos campos en el snapshot.
+- `src/main.rs` inicia en 980×660 y conserva la ventana fija sin maximizar ni fullscreen.
+- `src/app.rs` muestra la actividad de comandos en un `egui::Panel::bottom` fijo de egui y pasa el mismo snapshot a las funciones de UI indicadas abajo.
+
+### Interfaz (propiedad T8-UI: solo `src/ui/**`)
+
+- Conserva `render(ui, state, snapshot) -> Option<UiAction>` para el área principal y añade `render_terminal(ui, state, snapshot) -> ()` para el panel inferior.
+- El panel inferior es una consola de solo lectura integrada en la ventana, no una pestaña ni una lista de tarjetas plegables. Presenta ejecuciones reales en orden temporal, hora, cada invocación y cwd, salidas stdout/stderr diferenciadas, estado/código y copia del comando. Se actualiza al recibir cada resultado del worker y sigue el final cuando el usuario ya está en el final; permite desplazarse por la sesión.
+- Es un transcript de operaciones Git/gh de Gitzi, no un shell general. No inventa comandos ni presenta la salida de una ejecución como si fuese streaming por fragmentos mientras el proceso sigue activo.
+- Botón **Iniciar sesión** activa la misma acción tipada; la UI explica que Gitzi abre el navegador externo del sistema sin terminal aparte, que el código de dispositivo se copia, y que después se usa **Verificar sesión**. No se pide token ni se presenta un WebView de GitHub.
+- La ruta del repositorio y el destino de clonado ofrecen selección de carpetas mediante `rfd::FileDialog::pick_folder`; cancelar conserva el texto actual.
+- Los controles interactivos usan objetivos de al menos 38 px de alto, buen contraste/foco y estados busy/deshabilitados; sin cambios a acciones de Git ni lógica de procesos.
+
+### Motor Git (propiedad T8-GIT: solo `src/git/**`)
+
+- `StartGitHubBrowserLogin` ejecuta `gh auth login --hostname github.com --web --clipboard` con argumentos separados, stdin/stdout/stderr no interactivos y sin ventana de terminal: `CREATE_NO_WINDOW` en Windows y los handles de stdio redirigidos a null en Linux.
+- Al completar el spawn registra el comando como `Running` y devuelve `GitHubLoginStarted`; el worker envía esa respuesta antes de monitorizar el `Child` desde un hilo separado. Al terminar, emite `GitHubLoginFinished` con el estado y actualiza por ID la misma entrada con duración, código de salida y éxito/error. No captura las salidas del proceso ni bloquea la cola Git. `CheckGitHubAuth` sigue siendo explícito y se puede usar mientras el flujo de navegador esté en curso; una verificación iniciada durante el login no puede sobrescribir el resultado final de ese login. Al cerrar `GitWorker`, se cancela el watcher y se termina/recolecta el proceso para que no quede huérfano. La CLI realiza el flujo de dispositivo y abre el navegador del sistema.
+- No pasa token, no vuelca el código de un solo uso en el registro, no espera en el worker, no cambia `git_protocol` ni configura `credential.helper` globalmente. El comando de inicio y fallos de lanzamiento se registran fielmente. La autenticación de `gh` no implica que el `git push` use el token de `gh`; Git conserva el helper/agente ya configurado por el usuario.
+- Los tests de runner verifican argv del flujo y estados sin cuentas ni red real; no se prueba el login en una cuenta real.
+
 ## Integración: `src/app.rs` (propiedad del orquestador)
 
 - Inicia el trabajador y agenda detección de Git; drena respuestas con `try_recv` sin bloquear egui.

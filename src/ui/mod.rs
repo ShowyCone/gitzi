@@ -46,7 +46,6 @@ pub struct UiState {
     selected_commit: Option<String>,
     compare_base: String,
     compare_target: String,
-    command_log_open: bool,
     copied_command: Option<u64>,
     editor_path: String,
     observed_editor: Option<Option<PathBuf>>,
@@ -77,7 +76,6 @@ impl Default for UiState {
             selected_commit: None,
             compare_base: String::new(),
             compare_target: String::new(),
-            command_log_open: false,
             copied_command: None,
             editor_path: String::new(),
             observed_editor: None,
@@ -149,7 +147,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                     ui.add_space(10.0);
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Ruta del repositorio");
-                        let field_width = (ui.available_width() - 72.0).clamp(140.0, 560.0);
+                        let field_width = (ui.available_width() - 250.0).clamp(140.0, 540.0);
                         let field = ui.add(
                             egui::TextEdit::singleline(&mut state.repository_path)
                                 .hint_text("Selecciona o escribe una ruta")
@@ -157,6 +155,14 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                                 .id_source("repository_path"),
                         );
                         field.on_hover_text("Ruta local del repositorio Git");
+                        let choose =
+                            ui.add_sized([132.0, 40.0], egui::Button::new("Elegir carpeta…"));
+                        if choose.clicked()
+                            && let Some(path) =
+                                choose_folder("Selecciona el repositorio", &state.repository_path)
+                        {
+                            state.repository_path = path.display().to_string();
+                        }
                         let open = ui.add_enabled(
                             can_act && !state.repository_path.trim().is_empty(),
                             egui::Button::new("Abrir"),
@@ -183,17 +189,28 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                     ui.separator();
                     ui.label(egui::RichText::new("Clonar repositorio").strong());
                     ui.horizontal_wrapped(|ui| {
-                        let row_width = ui.available_width();
                         ui.add(
                             egui::TextEdit::singleline(&mut state.clone_source)
                                 .hint_text("URL o ruta de origen")
-                                .desired_width((row_width * 0.40).clamp(180.0, 360.0)),
+                                .desired_width((ui.available_width() - 20.0).clamp(220.0, 590.0)),
                         );
+                    });
+                    ui.horizontal_wrapped(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut state.clone_destination)
                                 .hint_text("Destino local")
-                                .desired_width((row_width * 0.40).clamp(180.0, 360.0)),
+                                .desired_width((ui.available_width() - 290.0).clamp(180.0, 440.0)),
                         );
+                        let choose =
+                            ui.add_sized([132.0, 40.0], egui::Button::new("Elegir carpeta…"));
+                        if choose.clicked()
+                            && let Some(path) = choose_folder(
+                                "Selecciona el destino del clon",
+                                &state.clone_destination,
+                            )
+                        {
+                            state.clone_destination = path.display().to_string();
+                        }
                         let clone = ui.add_enabled(
                             can_act
                                 && !state.clone_source.trim().is_empty()
@@ -426,32 +443,6 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
 
             render_confirmation(ui, state, snapshot, can_act, &mut action);
 
-            ui.add_space(12.0);
-            let log_response = egui::CollapsingHeader::new(
-                egui::RichText::new(format!(
-                    "Registro de comandos ({})",
-                    snapshot.command_log.len()
-                ))
-                .strong(),
-            )
-            .id_salt("command_log")
-            .default_open(state.command_log_open)
-            .show(ui, |ui| {
-                if snapshot.command_log.is_empty() {
-                    ui.label(egui::RichText::new("Aún no hay comandos registrados.").weak());
-                } else {
-                    egui::ScrollArea::both()
-                        .id_salt("command_log_scroll")
-                        .max_height(220.0)
-                        .show(ui, |ui| {
-                            for entry in snapshot.command_log.iter().rev() {
-                                command_entry(ui, state, entry);
-                                ui.add_space(6.0);
-                            }
-                        });
-                }
-            });
-            state.command_log_open = log_response.body_returned.is_some();
             if matches!(
                 action.as_ref(),
                 Some(
@@ -465,6 +456,131 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
             }
         });
     action
+}
+
+/// Render the real command output as one read-only terminal transcript.
+/// The app worker publishes entries after each operation completes; this view
+/// intentionally does not imply that output is streamed while a process runs.
+pub fn render_terminal(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) {
+    apply_theme(ui);
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(13, 17, 23))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(49, 61, 75)))
+        .inner_margin(egui::Margin::symmetric(12, 7))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Terminal de actividad").strong());
+                ui.label(
+                    egui::RichText::new(format!("{} comandos", snapshot.command_log.len())).weak(),
+                );
+            });
+            ui.add_space(3.0);
+            egui::ScrollArea::both()
+                .id_salt("command_terminal_transcript")
+                .max_height(174.0)
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if snapshot.command_log.is_empty() {
+                        ui.label(
+                            egui::RichText::new("Los comandos y sus resultados aparecerán aquí.")
+                                .weak(),
+                        );
+                    }
+                    for entry in &snapshot.command_log {
+                        terminal_entry(ui, state, entry);
+                    }
+                });
+        });
+}
+
+fn terminal_entry(ui: &mut egui::Ui, state: &mut UiState, entry: &CommandEntry) {
+    let (label, color) = match entry.status {
+        CommandStatus::Running => ("EN CURSO", egui::Color32::from_rgb(111, 174, 222)),
+        CommandStatus::Succeeded => ("OK", egui::Color32::from_rgb(117, 220, 173)),
+        CommandStatus::SucceededWithDifferences => {
+            ("OK · cambios", egui::Color32::from_rgb(255, 199, 102))
+        }
+        CommandStatus::Failed => ("ERROR", ui.visuals().error_fg_color),
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            egui::RichText::new("›")
+                .color(egui::Color32::from_rgb(111, 214, 174))
+                .strong(),
+        );
+        ui.monospace(
+            egui::RichText::new(&entry.command_display)
+                .color(egui::Color32::from_rgb(218, 229, 239)),
+        );
+        if ui
+            .add_sized(
+                [82.0, 40.0],
+                egui::Button::new(if state.copied_command == Some(entry.id) {
+                    "Copiado"
+                } else {
+                    "Copiar"
+                }),
+            )
+            .clicked()
+        {
+            ui.ctx().copy_text(entry.command_display.clone());
+            state.copied_command = Some(entry.id);
+        }
+        ui.label(egui::RichText::new(label).color(color).strong());
+        if let Some(code) = entry.exit_code {
+            ui.label(
+                egui::RichText::new(format!("código {code} · {} ms", entry.duration.as_millis()))
+                    .weak(),
+            );
+        }
+        ui.label(egui::RichText::new(format_command_time(entry.started_at)).weak());
+    });
+    if let Some(cwd) = &entry.cwd {
+        ui.label(
+            egui::RichText::new(format!("  en {}", cwd.display()))
+                .weak()
+                .monospace(),
+        );
+    }
+    if !entry.stdout.is_empty() {
+        ui.label(
+            egui::RichText::new(&entry.stdout)
+                .monospace()
+                .color(egui::Color32::from_rgb(194, 207, 220)),
+        );
+    }
+    if !entry.stderr.is_empty() {
+        ui.label(
+            egui::RichText::new(&entry.stderr)
+                .monospace()
+                .color(ui.visuals().error_fg_color),
+        );
+    }
+    ui.add_space(5.0);
+}
+
+fn choose_folder(title: &str, current_path: &str) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().set_title(title);
+    let mut current = PathBuf::from(current_path);
+    while !current.is_dir() && current.pop() {}
+    if current.is_dir() {
+        dialog = dialog.set_directory(current);
+    }
+    dialog.pick_folder()
+}
+
+fn format_command_time(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let seconds_of_day = seconds % 86_400;
+    format!(
+        "{:02}:{:02}:{:02} UTC",
+        seconds_of_day / 3_600,
+        (seconds_of_day / 60) % 60,
+        seconds_of_day % 60
+    )
 }
 
 fn render_github_login(
@@ -491,7 +607,7 @@ fn render_github_login(
                     ("GitHub CLI no disponible", ui.visuals().warn_fg_color)
                 }
                 GitHubAuthStatus::LoginStarted => (
-                    "Completa el acceso en la consola",
+                    "Autorización en curso",
                     ui.visuals().weak_text_color(),
                 ),
             };
@@ -505,8 +621,10 @@ fn render_github_login(
                 });
 
             let start = ui.add_enabled(
-                can_act && action.is_none(),
-                egui::Button::new("Iniciar sesión en navegador"),
+                can_act
+                    && action.is_none()
+                    && snapshot.github_auth_status != GitHubAuthStatus::LoginStarted,
+                egui::Button::new("Iniciar sesión"),
             );
             if start.clicked() {
                 *action = Some(UiAction::StartGitHubBrowserLogin);
@@ -521,7 +639,7 @@ fn render_github_login(
         });
         ui.label(
             egui::RichText::new(
-                "gh abre el navegador y usa una consola para completar cualquier paso restante. Al volver, verifica la sesión aquí. GitHub CLI es opcional para Git.",
+            "GitHub CLI abre el navegador externo y copia un código de un solo uso. Gitzi no abre otra consola. Al terminar, pulsa Verificar sesión.",
             )
             .weak(),
         );
@@ -664,8 +782,8 @@ fn apply_theme(ui: &mut egui::Ui) {
     let style = ui.style_mut();
     style.visuals = visuals;
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(9.0, 4.0);
-    style.spacing.interact_size = egui::vec2(28.0, 28.0);
+    style.spacing.button_padding = egui::vec2(12.0, 8.0);
+    style.spacing.interact_size = egui::vec2(40.0, 40.0);
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
     style
         .text_styles
@@ -1531,100 +1649,6 @@ fn empty_state(ui: &mut egui::Ui, title: &str, detail: &str) {
             ui.label(egui::RichText::new(detail).weak());
         });
     });
-}
-
-fn command_entry(ui: &mut egui::Ui, state: &mut UiState, entry: &CommandEntry) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(match entry.status {
-                    CommandStatus::Succeeded => "Correcto",
-                    CommandStatus::SucceededWithDifferences => "Correcto · con diferencias",
-                    CommandStatus::Failed => "Falló",
-                })
-                .color(match entry.status {
-                    CommandStatus::Succeeded | CommandStatus::SucceededWithDifferences => {
-                        ui.visuals().strong_text_color()
-                    }
-                    CommandStatus::Failed => ui.visuals().error_fg_color,
-                })
-                .strong(),
-            );
-            if let Some(code) = entry.exit_code {
-                ui.label(format!("Código {code}"));
-            }
-            ui.label(format!(
-                "{} · {} ms",
-                format_start_time(entry.started_at),
-                entry.duration.as_millis()
-            ));
-            let copied = state.copied_command == Some(entry.id);
-            if ui
-                .button(if copied { "Copiado" } else { "Copiar comando" })
-                .clicked()
-            {
-                ui.ctx().copy_text(entry.command_display.clone());
-                state.copied_command = Some(entry.id);
-            }
-        });
-        egui::ScrollArea::horizontal()
-            .id_salt(("command_text", entry.id))
-            .max_height(28.0)
-            .show(ui, |ui| {
-                ui.monospace(egui::RichText::new(&entry.command_display).size(12.0));
-            });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Directorio").weak());
-            ui.monospace(
-                entry
-                    .cwd
-                    .as_ref()
-                    .map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
-            );
-        });
-        if !entry.stdout.is_empty() {
-            ui.collapsing("Salida", |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt(("command_stdout", entry.id))
-                    .max_height(96.0)
-                    .show(ui, |ui| {
-                        egui::ScrollArea::horizontal()
-                            .id_salt(("command_stdout_horizontal", entry.id))
-                            .show(ui, |ui| ui.monospace(&entry.stdout));
-                    });
-            });
-        }
-        if !entry.stderr.is_empty() {
-            ui.collapsing("Error", |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt(("command_stderr", entry.id))
-                    .max_height(96.0)
-                    .show(ui, |ui| {
-                        egui::ScrollArea::horizontal()
-                            .id_salt(("command_stderr_horizontal", entry.id))
-                            .show(ui, |ui| {
-                                ui.monospace(
-                                    egui::RichText::new(&entry.stderr)
-                                        .color(ui.visuals().error_fg_color),
-                                )
-                            });
-                    });
-            });
-        }
-    });
-}
-
-fn format_start_time(time: SystemTime) -> String {
-    let seconds_since_epoch = time
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    let seconds_of_day = seconds_since_epoch % 86_400;
-    format!(
-        "{:02}:{:02}:{:02} UTC",
-        seconds_of_day / 3_600,
-        (seconds_of_day / 60) % 60,
-        seconds_of_day % 60
-    )
 }
 
 #[cfg(test)]

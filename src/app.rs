@@ -17,6 +17,7 @@ const COMMAND_LOG_LIMIT: usize = 200;
 struct PendingRequest {
     generation: u64,
     refresh_after_error: Option<PathBuf>,
+    auth_check_started_during_login: bool,
 }
 
 pub struct GitziApp {
@@ -26,6 +27,7 @@ pub struct GitziApp {
     next_request_id: u64,
     generation: u64,
     pending: HashMap<u64, PendingRequest>,
+    github_login_process_active: bool,
 }
 
 impl GitziApp {
@@ -43,6 +45,7 @@ impl GitziApp {
             next_request_id: 1,
             generation: 0,
             pending: HashMap::new(),
+            github_login_process_active: false,
         };
 
         app.submit(GitOperation::DetectGit, 0);
@@ -51,6 +54,8 @@ impl GitziApp {
 
     fn submit(&mut self, operation: GitOperation, generation: u64) {
         let is_detection = matches!(&operation, GitOperation::DetectGit);
+        let auth_check_started_during_login =
+            matches!(&operation, GitOperation::CheckGitHubAuth) && self.github_login_process_active;
         let refresh_after_error = match &operation {
             GitOperation::Fetch(repository) => Some(repository.clone()),
             GitOperation::Pull { repository, .. }
@@ -89,6 +94,7 @@ impl GitziApp {
                     PendingRequest {
                         generation,
                         refresh_after_error,
+                        auth_check_started_during_login,
                     },
                 );
                 self.snapshot.busy = true;
@@ -792,10 +798,29 @@ impl GitziApp {
 
     fn receive_responses(&mut self) {
         while let Some(response) = self.worker.try_recv() {
+            if let Ok(GitResult::GitHubLoginFinished { status }) = &response.result {
+                self.update_commands(response.commands);
+                self.github_login_process_active = false;
+                self.snapshot.github_auth_status = status.clone();
+                if status == &GitHubAuthStatus::Authenticated {
+                    self.snapshot.error_message = None;
+                    self.snapshot.success_message =
+                        Some("Sesión de GitHub iniciada correctamente.".into());
+                } else {
+                    self.snapshot.error_message = Some(
+                        "GitHub CLI terminó sin completar el inicio de sesión. Puedes intentarlo de nuevo.".into(),
+                    );
+                }
+                continue;
+            }
+
             let pending = self.pending.remove(&response.id);
             let is_current = pending
                 .as_ref()
                 .is_some_and(|request| request.generation == response.generation);
+            let auth_check_started_during_login = pending
+                .as_ref()
+                .is_some_and(|request| request.auth_check_started_during_login);
             let refresh_after_error = pending.and_then(|request| request.refresh_after_error);
             self.snapshot.busy = !self.pending.is_empty();
             self.append_commands(response.commands);
@@ -810,10 +835,13 @@ impl GitziApp {
                     self.snapshot.git_version = Some(version);
                 }
                 Ok(GitResult::GitHubLoginStarted) => {
+                    self.github_login_process_active = true;
                     self.snapshot.github_auth_status = GitHubAuthStatus::LoginStarted;
                 }
                 Ok(GitResult::GitHubAuthChecked { status }) => {
-                    self.snapshot.github_auth_status = status;
+                    if !self.github_login_process_active && !auth_check_started_during_login {
+                        self.snapshot.github_auth_status = status;
+                    }
                 }
                 Ok(GitResult::GitHubRepositoryCreated {
                     repository,
@@ -1008,6 +1036,26 @@ impl GitziApp {
 
     fn append_commands(&mut self, commands: Vec<CommandEntry>) {
         self.snapshot.command_log.extend(commands);
+        self.trim_command_log();
+    }
+
+    fn update_commands(&mut self, commands: Vec<CommandEntry>) {
+        for command in commands {
+            if let Some(existing) = self
+                .snapshot
+                .command_log
+                .iter_mut()
+                .find(|entry| entry.id == command.id)
+            {
+                *existing = command;
+            } else {
+                self.snapshot.command_log.push(command);
+            }
+        }
+        self.trim_command_log();
+    }
+
+    fn trim_command_log(&mut self) {
         let overflow = self
             .snapshot
             .command_log
@@ -1021,6 +1069,8 @@ impl GitziApp {
     fn request_pending_repaint(&self, ctx: &egui::Context) {
         if self.snapshot.busy {
             ctx.request_repaint_after(Duration::from_millis(100));
+        } else if self.github_login_process_active {
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
     }
 }
@@ -1044,8 +1094,17 @@ impl eframe::App for GitziApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if let Some(action) = ui::render(ui, &mut self.ui_state, &self.snapshot) {
-            self.handle_action(action);
-        }
+        egui::Panel::bottom("command_terminal")
+            .resizable(true)
+            .default_size(164.0)
+            .size_range(116.0..=228.0)
+            .show(ui, |ui| {
+                ui::render_terminal(ui, &mut self.ui_state, &self.snapshot);
+            });
+        egui::CentralPanel::default().show(ui, |ui| {
+            if let Some(action) = ui::render(ui, &mut self.ui_state, &self.snapshot) {
+                self.handle_action(action);
+            }
+        });
     }
 }

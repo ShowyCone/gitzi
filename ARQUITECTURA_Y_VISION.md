@@ -64,7 +64,7 @@ Al iniciar, Gitzi debe detectar Git y mostrar un error accionable si no está di
 | Panel lateral | Archivos modificados, preparados y sin seguimiento |
 | Área central | Diferencias, historial o comparación según la selección |
 | Área de commit | Mensaje y acción para confirmar los cambios preparados |
-| Panel inferior plegable | Registro de comandos, salida, errores y botón de copiar |
+| Terminal inferior | Transcript de comandos, salida, errores y botón de copiar integrado en la ventana |
 
 Las acciones frecuentes deben estar a mano. Las avanzadas se agrupan en menús contextuales o secciones desplegables. Los botones deben representar operaciones concretas; se evitará un botón ambiguo de sincronización que encadene decisiones ocultas.
 
@@ -78,7 +78,7 @@ Las acciones frecuentes deben estar a mano. Las avanzadas se agrupan en menús c
 - Listas e historial con carga progresiva; diferencias grandes con límites explícitos.
 - Sin animaciones decorativas continuas ni repintado constante en reposo.
 
-La ventana se inicia fija en 1024×700, sin maximización, fullscreen ni redimensionamiento. El contenido se adapta con scroll y jerarquía compacta; la densidad no debe perjudicar legibilidad.
+La ventana se inicia fija en 980×660, sin maximización, fullscreen ni redimensionamiento. El contenido principal se adapta con scroll y jerarquía compacta; una consola de actividad en el borde inferior permanece visible y puede ajustar su altura. La densidad no debe perjudicar legibilidad.
 
 No mostrar paneles vacíos como si una función estuviera implementada. Durante el prototipo pueden usarse datos de ejemplo claramente identificados y aislados de los repositorios reales.
 
@@ -138,6 +138,9 @@ Aceptación: un conflicto no bloquea la aplicación ni provoca reintentos destru
 - Mostrar una confirmación que identifique el nombre y visibilidad y advierta que se agregará `origin`, se publicarán los commits de esa rama y los cambios sin commit permanecerán locales.
 - Validar login de GitHub CLI, commits, rama local, slug y ausencia de `origin`; no sobrescribir remotos ni crear commits automáticamente.
 - Mantener la interfaz moderna y ligera en una ventana compacta, con registro de comandos claramente escaneable y fácil de copiar.
+- La actualización T8 sustituye el historial plegable por un transcript terminal de solo lectura, ordenado por ejecución y anclado a la zona inferior de la ventana. Los resultados se agregan al recibir cada respuesta del worker; el login conserva su estado provisional hasta que el proceso termina y luego actualiza su entrada por ID. No se afirma streaming por fragmentos durante una operación.
+- Añadir selección de carpetas con el diálogo nativo del sistema para abrir/inicializar repositorios y definir destino de clonado.
+- Iniciar la autenticación web de `gh` dentro del proceso de Gitzi, sin una consola aparte. GitHub sigue requiriendo que el usuario apruebe la solicitud en el navegador del sistema; un navegador embebido requiere una aplicación OAuth registrada y queda fuera de este alcance.
 
 La operación remota usa `gh repo create`; no introduce cliente API, aplicación OAuth ni acceso a PRs/issues. La creación de un repositorio público se confirma de forma diferenciada. Un fallo durante push puede dejar creado el repo remoto y se comunica sin intentar borrar recursos.
 
@@ -226,7 +229,7 @@ Respetar las credenciales, agentes SSH, hooks, firma de commits y configuración
 
 Los procesos que necesitan interacción no pueden quedar esperando en una consola oculta indefinidamente. La implementación debe definir un mecanismo compatible o fallar con un mensaje accionable. No se prometerá soporte para todos los mecanismos de autenticación antes de probarlos.
 
-GitHub puede usar el credential helper o agente SSH que ya tenga configurado Git. Como flujo opcional, Gitzi puede iniciar `gh auth login --web` en una consola visible; GitHub CLI abre el navegador y la persona completa allí la autorización y cualquier prompt restante. Después Gitzi ofrece comprobar el estado con `gh auth status`. GitHub CLI es opcional para las demás funciones Git; se requiere para iniciar sesión desde la UI y crear un repo GitHub desde los commits actuales. Gitzi no lee ni persiste tokens y no configura globalmente Git sin consentimiento. No implementa un cliente API propio, pull requests ni issues.
+GitHub puede usar el credential helper o agente SSH que ya tenga configurado Git. Desde T8, Gitzi inicia `gh auth login --hostname github.com --web --clipboard` sin abrir una consola; GitHub CLI abre el navegador del sistema, copia el código temporal y guarda la credencial según su configuración. Gitzi ofrece comprobar el estado con `gh auth status`. No se pasa ni se registra el código temporal, y el login no configura globalmente el helper o protocolo de Git. La autenticación de `gh` no garantiza que una operación Git de push use ese token; Git sigue usando el credential helper o agente SSH configurado por el usuario. GitHub CLI es opcional para las demás funciones Git; se requiere para iniciar sesión desde la UI y crear un repo GitHub desde los commits actuales. Gitzi no lee ni persiste tokens ni implementa cliente API propio, pull requests o issues.
 
 ## 8. Registro de comandos
 

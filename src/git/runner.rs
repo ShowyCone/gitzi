@@ -9,7 +9,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -158,6 +158,9 @@ pub enum GitResult {
         version: String,
     },
     GitHubLoginStarted,
+    GitHubLoginFinished {
+        status: GitHubAuthStatus,
+    },
     GitHubRepositoryCreated {
         repository: PathBuf,
         remote_url: String,
@@ -277,9 +280,102 @@ pub struct GitResponse {
     pub commands: Vec<CommandEntry>,
 }
 
+pub(crate) struct LoginWatcher {
+    request_id: u64,
+    generation: u64,
+    child: std::process::Child,
+    command: CommandEntry,
+    shutdown: std::sync::Arc<AtomicBool>,
+}
+
+impl LoginWatcher {
+    pub(crate) fn wait_for_completion(mut self) -> GitResponse {
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                let _ = self.child.kill();
+                let status = self.child.wait().ok();
+                return self.finished_response(status, None);
+            }
+            match self.child.try_wait() {
+                Ok(Some(status)) => return self.finished_response(Some(status), None),
+                Ok(None) => thread::sleep(Duration::from_millis(40)),
+                Err(error) => {
+                    let _ = self.child.kill();
+                    let status = self.child.wait().ok();
+                    return self.finished_response(
+                        status,
+                        Some(format!(
+                            "No se pudo esperar la finalización del flujo de GitHub CLI: {error}"
+                        )),
+                    );
+                }
+            }
+        }
+    }
+
+    pub(crate) fn monitor_start_failed(mut self, error: std::io::Error) -> GitResponse {
+        let _ = self.child.kill();
+        let status = self.child.wait().ok();
+        self.finished_response(
+            status,
+            Some(format!(
+                "No se pudo iniciar el monitor del flujo de GitHub CLI: {error}"
+            )),
+        )
+    }
+
+    fn finished_response(
+        &mut self,
+        status: Option<std::process::ExitStatus>,
+        error: Option<String>,
+    ) -> GitResponse {
+        let succeeded = error.is_none() && status.is_some_and(|status| status.success());
+        self.command.exit_code = status.and_then(|status| status.code());
+        self.command.status = if succeeded {
+            CommandStatus::Succeeded
+        } else {
+            CommandStatus::Failed
+        };
+        if let Some(error) = error {
+            self.command.stderr = redact_text(&error);
+        }
+        self.command.duration = self.command.started_at.elapsed().unwrap_or_default();
+        GitResponse {
+            id: self.request_id,
+            generation: self.generation,
+            result: Ok(GitResult::GitHubLoginFinished {
+                status: github_auth_status_for_exit(succeeded),
+            }),
+            commands: vec![self.command.clone()],
+        }
+    }
+}
+
+impl Drop for LoginWatcher {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
+pub(crate) fn handle_request_with_monitor(
+    request: GitRequest,
+    shutdown: std::sync::Arc<AtomicBool>,
+) -> (GitResponse, Option<LoginWatcher>) {
+    if matches!(&request.operation, GitOperation::StartGitHubBrowserLogin) {
+        start_github_login(request, shutdown)
+    } else {
+        (handle_request(request), None)
+    }
+}
+
 pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
     let (result, commands) = match request.operation {
-        GitOperation::StartGitHubBrowserLogin => start_github_login(),
+        GitOperation::StartGitHubBrowserLogin => unreachable!(
+            "GitHub login must use handle_request_with_monitor so its process is watched"
+        ),
         GitOperation::CheckGitHubAuth => check_github_auth(),
         GitOperation::CreateGitHubRepository {
             repository,
@@ -2381,7 +2477,10 @@ fn github_repo_create_args(name: &str, visibility: GitHubRepositoryVisibility) -
     .collect()
 }
 
-fn start_github_login() -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
+fn start_github_login(
+    request: GitRequest,
+    shutdown: std::sync::Arc<AtomicBool>,
+) -> (GitResponse, Option<LoginWatcher>) {
     // Fail early with a useful message when `gh` is missing, while logging the
     // actual version check. The interactive login itself is never captured.
     let version_args = [OsString::from("--version")];
@@ -2398,35 +2497,76 @@ fn start_github_login() -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
                     "No se pudo ejecutar GitHub CLI. Instala `gh` y comprueba que esté en PATH. {detail}"
                 )
             };
-            return (Err(GitError { message }), commands);
+            return (
+                GitResponse {
+                    id: request.id,
+                    generation: request.generation,
+                    result: Err(GitError { message }),
+                    commands,
+                },
+                None,
+            );
         }
         Err(error) if is_program_not_found(&error) => {
             return (
-                Err(GitError {
-                    message: "GitHub CLI (`gh`) no está instalado o no está en PATH. Instálalo para iniciar sesión con GitHub.".into(),
-                }),
-                commands,
+                GitResponse {
+                    id: request.id,
+                    generation: request.generation,
+                    result: Err(GitError {
+                        message: "GitHub CLI (`gh`) no está instalado o no está en PATH. Instálalo para iniciar sesión con GitHub.".into(),
+                    }),
+                    commands,
+                },
+                None,
             );
         }
         Err(error) => {
             return (
-                Err(GitError {
-                    message: format!("No se pudo comprobar GitHub CLI. {error}"),
-                }),
-                commands,
+                GitResponse {
+                    id: request.id,
+                    generation: request.generation,
+                    result: Err(GitError {
+                        message: format!("No se pudo comprobar GitHub CLI. {error}"),
+                    }),
+                    commands,
+                },
+                None,
             );
         }
     }
 
     let login_args = github_login_args();
-    match spawn_visible_login(&login_args) {
-        Ok(entries) => {
-            commands.extend(entries);
-            (Ok(GitResult::GitHubLoginStarted), commands)
+    match spawn_background_login(OsString::from("gh").as_os_str(), &login_args) {
+        Ok((entry, child)) => {
+            let watcher = LoginWatcher {
+                request_id: request.id,
+                generation: request.generation,
+                child,
+                command: entry.clone(),
+                shutdown,
+            };
+            commands.push(entry);
+            (
+                GitResponse {
+                    id: request.id,
+                    generation: request.generation,
+                    result: Ok(GitResult::GitHubLoginStarted),
+                    commands,
+                },
+                Some(watcher),
+            )
         }
-        Err((entries, message)) => {
-            commands.extend(entries);
-            (Err(GitError { message }), commands)
+        Err((entry, message)) => {
+            commands.push(*entry);
+            (
+                GitResponse {
+                    id: request.id,
+                    generation: request.generation,
+                    result: Err(GitError { message }),
+                    commands,
+                },
+                None,
+            )
         }
     }
 }
@@ -2439,10 +2579,17 @@ fn github_auth_status_args() -> Vec<OsString> {
 }
 
 fn github_login_args() -> Vec<OsString> {
-    ["auth", "login", "--hostname", "github.com", "--web"]
-        .into_iter()
-        .map(OsString::from)
-        .collect()
+    [
+        "auth",
+        "login",
+        "--hostname",
+        "github.com",
+        "--web",
+        "--clipboard",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
 }
 
 fn github_auth_status_for_exit(success: bool) -> GitHubAuthStatus {
@@ -2462,101 +2609,58 @@ fn is_program_not_found(error: &str) -> bool {
         || error.contains("NotFound")
 }
 
-#[cfg(windows)]
-fn spawn_visible_login(
+fn spawn_background_login(
+    executable: &std::ffi::OsStr,
     args: &[OsString],
-) -> Result<Vec<CommandEntry>, (Vec<CommandEntry>, String)> {
-    use std::os::windows::process::CommandExt;
-    let mut command = Command::new("gh");
-    command.args(args).creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
-    let invocation_args = args.to_vec();
-    record_spawn_result("gh", &invocation_args, None, command.spawn())
-        .map(|entry| vec![entry])
-        .map_err(|(entry, message)| (vec![*entry], message))
+) -> Result<(CommandEntry, std::process::Child), (Box<CommandEntry>, String)> {
+    let mut command = Command::new(executable);
+    configure_background_command(&mut command, args);
+    spawn_background_command(command, executable, args)
 }
 
-#[cfg(target_os = "linux")]
-fn spawn_visible_login(
-    args: &[OsString],
-) -> Result<Vec<CommandEntry>, (Vec<CommandEntry>, String)> {
-    let candidates: [(&str, &[&str]); 3] = [
-        ("x-terminal-emulator", &["-e"]),
-        ("gnome-terminal", &["--"]),
-        ("konsole", &["-e"]),
-    ];
-    let mut entries = Vec::new();
-    let mut failures = Vec::new();
-    for (terminal, prefix) in candidates {
-        let mut invocation_args = prefix
-            .iter()
-            .map(|arg| OsString::from(arg))
-            .collect::<Vec<_>>();
-        invocation_args.push(OsString::from("gh"));
-        invocation_args.extend_from_slice(args);
-        let mut command = Command::new(terminal);
-        command
-            .args(&invocation_args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        match record_spawn_result(terminal, &invocation_args, None, command.spawn()) {
-            Ok(entry) => {
-                entries.push(entry);
-                return Ok(entries);
-            }
-            Err((entry, message)) => {
-                failures.push(message);
-                entries.push(*entry);
-            }
-        }
+fn configure_background_command(command: &mut Command, args: &[OsString]) {
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let reason = failures.join("; ");
-    let message = format!(
-        "No se encontró un emulador de terminal compatible para iniciar el login. Ejecuta manualmente `gh auth login --hostname github.com --web` en una terminal. {reason}"
-    );
-    // Preserve every real failed terminal launch in the response log and put
-    // the actionable aggregate message on the final entry.
-    if let Some(last) = entries.last_mut() {
-        last.stderr = redact_text(&message);
-    }
-    Err((entries, message))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
-fn spawn_visible_login(
-    _args: &[OsString],
-) -> Result<Vec<CommandEntry>, (Vec<CommandEntry>, String)> {
-    let message = "El inicio interactivo está disponible actualmente en Windows y Linux. Ejecuta `gh auth login --hostname github.com --web` en una terminal.".to_owned();
-    let entry = synthetic_launch_failure("gh", &[], message.clone());
-    Err((vec![entry], message))
-}
-
-fn record_spawn_result(
-    executable: &str,
+fn spawn_background_command(
+    mut command: Command,
+    executable: &std::ffi::OsStr,
     args: &[OsString],
-    cwd: Option<PathBuf>,
-    result: std::io::Result<std::process::Child>,
-) -> Result<CommandEntry, (Box<CommandEntry>, String)> {
+) -> Result<(CommandEntry, std::process::Child), (Box<CommandEntry>, String)> {
     let started_at = SystemTime::now();
-    let display = command_display(executable, args);
-    match result {
-        Ok(_child) => Ok(CommandEntry {
-            id: LOG_ID.fetch_add(1, Ordering::Relaxed),
-            command_display: redact_text(&display),
-            cwd,
-            started_at,
-            duration: Duration::ZERO,
-            status: CommandStatus::Succeeded,
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-        }),
+    let display = command_display(&executable.to_string_lossy(), args);
+    match command.spawn() {
+        Ok(child) => Ok((
+            CommandEntry {
+                id: LOG_ID.fetch_add(1, Ordering::Relaxed),
+                command_display: redact_text(&display),
+                cwd: None,
+                started_at,
+                duration: Duration::ZERO,
+                status: CommandStatus::Running,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            child,
+        )),
         Err(error) => {
-            let message = format!("No se pudo abrir la consola interactiva: {error}");
+            let message = format!(
+                "No se pudo iniciar GitHub CLI para abrir el flujo de autorización web. Comprueba que `gh` siga instalado y que el navegador predeterminado esté disponible. {error}"
+            );
             let entry = CommandEntry {
                 id: LOG_ID.fetch_add(1, Ordering::Relaxed),
                 command_display: redact_text(&display),
-                cwd,
+                cwd: None,
                 started_at,
                 duration: Duration::ZERO,
                 status: CommandStatus::Failed,
@@ -2566,21 +2670,6 @@ fn record_spawn_result(
             };
             Err((Box::new(entry), message))
         }
-    }
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
-fn synthetic_launch_failure(executable: &str, args: &[OsString], message: String) -> CommandEntry {
-    CommandEntry {
-        id: LOG_ID.fetch_add(1, Ordering::Relaxed),
-        command_display: redact_text(&command_display(executable, args)),
-        cwd: None,
-        started_at: SystemTime::now(),
-        duration: Duration::ZERO,
-        status: CommandStatus::Failed,
-        exit_code: None,
-        stdout: String::new(),
-        stderr: redact_text(&message),
     }
 }
 
@@ -2995,8 +3084,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             login,
-            ["auth", "login", "--hostname", "github.com", "--web"]
+            [
+                "auth",
+                "login",
+                "--hostname",
+                "github.com",
+                "--web",
+                "--clipboard"
+            ]
         );
+        assert!(!login.iter().any(|arg| arg == "--git-protocol"));
+        assert!(!login.iter().any(|arg| arg == "setup-git"));
         assert_eq!(
             github_auth_status_for_exit(true),
             GitHubAuthStatus::Authenticated
@@ -3005,6 +3103,119 @@ mod tests {
             github_auth_status_for_exit(false),
             GitHubAuthStatus::Unauthenticated
         );
+    }
+
+    #[test]
+    fn github_login_watcher_reports_success_and_updates_same_command() {
+        let args = [OsString::from("--version")];
+        let (entry, child) = spawn_background_login(std::ffi::OsStr::new("git"), &args).unwrap();
+        assert_eq!(entry.status, CommandStatus::Running);
+        assert_eq!(entry.exit_code, None);
+        let command_id = entry.id;
+        let response = LoginWatcher {
+            request_id: 71,
+            generation: 5,
+            child,
+            command: entry,
+            shutdown: std::sync::Arc::new(AtomicBool::new(false)),
+        }
+        .wait_for_completion();
+
+        assert_eq!((response.id, response.generation), (71, 5));
+        assert!(matches!(
+            response.result,
+            Ok(GitResult::GitHubLoginFinished {
+                status: GitHubAuthStatus::Authenticated
+            })
+        ));
+        assert_eq!(response.commands.len(), 1);
+        let updated = &response.commands[0];
+        assert_eq!(updated.id, command_id);
+        assert_eq!(updated.status, CommandStatus::Succeeded);
+        assert_eq!(updated.exit_code, Some(0));
+        assert!(updated.stdout.is_empty());
+        assert!(updated.stderr.is_empty());
+        assert!(updated.duration > Duration::ZERO);
+    }
+
+    #[test]
+    fn github_login_watcher_reports_failed_exit_and_updates_same_command() {
+        let args = [OsString::from("--gitzi-invalid-test-option")];
+        let (entry, child) = spawn_background_login(std::ffi::OsStr::new("git"), &args).unwrap();
+        assert_eq!(entry.status, CommandStatus::Running);
+        let command_id = entry.id;
+        let response = LoginWatcher {
+            request_id: 72,
+            generation: 6,
+            child,
+            command: entry,
+            shutdown: std::sync::Arc::new(AtomicBool::new(false)),
+        }
+        .wait_for_completion();
+
+        assert_eq!((response.id, response.generation), (72, 6));
+        assert!(matches!(
+            response.result,
+            Ok(GitResult::GitHubLoginFinished {
+                status: GitHubAuthStatus::Unauthenticated
+            })
+        ));
+        assert_eq!(response.commands.len(), 1);
+        let updated = &response.commands[0];
+        assert_eq!(updated.id, command_id);
+        assert_eq!(updated.status, CommandStatus::Failed);
+        assert_ne!(updated.exit_code, Some(0));
+        assert!(updated.stdout.is_empty());
+        assert!(updated.stderr.is_empty());
+        assert!(updated.duration > Duration::ZERO);
+    }
+
+    #[test]
+    fn github_login_child_waits_for_drop_when_requested() {
+        if std::env::var_os("GITZI_LOGIN_CHILD_WAIT").is_some() {
+            thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn dropping_login_watcher_kills_and_waits_for_its_child() {
+        let executable = std::env::current_exe().unwrap();
+        let args = [
+            OsString::from("--exact"),
+            OsString::from("git::runner::tests::github_login_child_waits_for_drop_when_requested"),
+        ];
+        let mut command = Command::new(&executable);
+        configure_background_command(&mut command, &args);
+        command.env("GITZI_LOGIN_CHILD_WAIT", "1");
+        let (entry, child) =
+            spawn_background_command(command, executable.as_os_str(), &args).unwrap();
+        assert_eq!(entry.status, CommandStatus::Running);
+        let watcher = LoginWatcher {
+            request_id: 73,
+            generation: 7,
+            child,
+            command: entry,
+            shutdown: std::sync::Arc::new(AtomicBool::new(false)),
+        };
+
+        let started_at = Instant::now();
+        drop(watcher);
+        assert!(started_at.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn github_login_launch_records_spawn_failure_actionably() {
+        let args = [OsString::from("auth")];
+        let (entry, message) = spawn_background_login(
+            std::ffi::OsStr::new("gitzi-missing-executable-for-test"),
+            &args,
+        )
+        .unwrap_err();
+        assert!(message.contains("GitHub CLI"));
+        assert!(message.contains("navegador"));
+        assert_eq!(entry.status, CommandStatus::Failed);
+        assert!(entry.command_display.contains("auth"));
+        assert!(entry.stderr.contains("GitHub CLI"));
     }
 
     #[test]

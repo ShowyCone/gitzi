@@ -121,6 +121,7 @@ pub struct FileDiff {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandStatus {
+    Running,
     Succeeded,
     SucceededWithDifferences,
     Failed,
