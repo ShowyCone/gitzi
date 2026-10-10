@@ -253,3 +253,29 @@ Se fija eframe `0.36.2` tras verificar la documentación oficial. Se desactivan 
 - Tras integrar ambos frentes, repetir formato, Clippy, pruebas y build release en Windows; ejecutar el script de empaquetado y revisar el ZIP.
 - Revisar estáticamente el workflow y el empaquetado Linux. Compatibilidad/GUI de Linux solo se afirma si se ejecutan en Linux; una definición de CI todavía no equivale a una ejecución de Actions.
 - Registrar tamaños y, si el host permite medirlos de forma fiable, arranque/uso en reposo. No declarar inspección visual manual sin haber abierto la ventana en un host gráfico.
+
+## Actualización T9: navegación por pestañas y estado automático
+
+Contrato T9 publicado antes de delegar. El orquestador es propietario de `src/domain.rs`, `src/app.rs` y documentación; T9-UI escribe solo `src/ui/**`; T9-GIT escribe solo `src/git/**`; T9-VERIFY es de solo lectura.
+
+### API compartida
+
+- `GitOperation::RefreshRepositoryStatus(PathBuf)` solicita una lectura local de estado.
+- `GitResult::RepositoryStatusRefreshed { path, status }` devuelve `RepositoryStatus` para esa ruta.
+- `AppSnapshot` añade `status_refreshing: bool` y `status_checked_at: Option<SystemTime>` para el indicador de la UI.
+- `RefreshRepositoryStatus` ejecuta `git status --porcelain=v2 --branch -z --untracked-files=all` con `--no-optional-locks`; además actualiza `last_fetch_at` e integración detectada usando los mecanismos existentes. No hace fetch, no actualiza referencias remotas ni altera el repositorio.
+- La app programa la consulta cada 2 segundos cuando hay un repo abierto y el worker está libre. La solicitud de fondo no activa `busy` ni se agrega al transcript de comandos. Las respuestas solo se aplican al repositorio activo que coincide con la ruta devuelta.
+- Al abrir Gitzi se solicita automáticamente `gh auth status`; la ausencia de GitHub CLI y la falta de sesión son estados visibles y no bloquean las funciones Git locales.
+
+### Interfaz T9 (`src/ui/**`)
+
+- La ventana conserva un encabezado fijo con nombre del repositorio, rama, árbol de trabajo limpio/sucio, cantidad de archivos cambiados, ahead/behind y señal de última actualización. Los conteos se identifican como refs locales conocidas; no se presentan como datos remotos en tiempo real.
+- La navegación ofrece pestañas: **Cambios** (archivos, diff, stage/unstage y commit), **Sincronizar** (fetch/pull/push, publicación y upstream), **Historial** (commits, detalle y comparación), **Ramas** (crear/cambiar/eliminar y asociación de upstream), **Integrar** (merge/rebase/revert, conflictos y stash) y **Repositorio** (abrir/recientes/inicializar/clonar, sesión y creación de repositorio GitHub, preferencias del editor).
+- El panel de actividad/terminal T8 permanece visible mientras se cambia de pestaña. Las pestañas conservan los controles existentes, estados vacíos/ocupados/errores y confirmaciones.
+- “Inicializar” queda deshabilitado si la ruta escogida ya contiene o está dentro de un repositorio Git, incluyendo `.git` como directorio o archivo, y muestra la razón.
+
+### Integración T9 (`src/app.rs`)
+
+- El estado inicial programa detección de Git y verificación de sesión GitHub. Un resultado de autenticación tardío no reemplaza un login más reciente en curso.
+- La lectura automática de estado mantiene una sola solicitud en vuelo, no bloquea acciones de usuario, descarta respuestas de rutas anteriores y repinta con temporizador de bajo costo, sin bucle continuo.
+- Abrir, refrescar y mutar conservan el flujo de inspección/listas ya existente; el polling solo reemplaza el estado del repositorio activo.

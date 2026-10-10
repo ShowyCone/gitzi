@@ -84,3 +84,14 @@ Contrato T8 publicado en `CONTRATOS.md` antes de delegar. El orquestador posee C
 | T8-VERIFY | Agente de verificación | Revisión independiente del flujo integrado T8 | Sin cambios de producción | T8-APP/UI/GIT integrados por el orquestador | Revisar diff/contratos y confirmar cierre del watcher/carreras; fmt, Clippy y pruebas/build Windows pasan; sin login real ni operaciones remotas | aceptada |
 
 La actualización T8 queda cerrada tras verificación integrada Windows y revisión independiente sin bloqueos. La GUI visual, Linux, Actions remotas, autenticación real y publicación contra una cuenta siguen pendientes por entorno/credenciales; no se usó una cuenta ni se añadió un remoto durante esta entrega.
+
+## Actualización solicitada T9 — navegación, estado de repo y sesión automática
+
+Contrato publicado en `CONTRATOS.md`. Propiedad exclusiva: orquestador (`src/domain.rs`, `src/app.rs`, documentos), interfaz (`src/ui/**`), motor (`src/git/**`) y verificación de solo lectura.
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T9-APP | Orquestador | Contrato de polling, respuesta de fondo y detección de sesión al iniciar | `src/domain.rs`, `src/app.rs` | API T9 publicada en `CONTRATOS.md` | Poll local cada 2 s, uno en vuelo, sin busy ni ruido terminal; respuestas asociadas a ruta; `gh auth status` al abrir | en curso |
+| T9-GIT | Agente de motor | Operación dedicada para refrescar solo estado local del repositorio | `src/git/**` | `RefreshRepositoryStatus` y `RepositoryStatusRefreshed` fijados en contrato | Usa porcelain v2 y no-optional-locks; informa status, fetch conocido e integración; sin red; pruebas con repo temporal | pendiente |
+| T9-UI | Agente de interfaz | Pestañas organizadas, estado fijo y bloqueo de init en repos existentes | Solo `src/ui/**` | Campos T9 del snapshot y API ya publicada | Conserva todos los flujos aceptados; status nombre/rama/cambios/ahead-behind; terminal fija; init deshabilitado en ruta Git | pendiente |
+| T9-VERIFY | Agente revisor | Revisión independiente del resultado integrado | Sin cambios | T9-APP/GIT/UI integrados | Busca regresiones y verifica el comportamiento requerido; sin cambios de escritura | pendiente |

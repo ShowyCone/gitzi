@@ -142,6 +142,8 @@ Aceptación: un conflicto no bloquea la aplicación ni provoca reintentos destru
 - Añadir selección de carpetas con el diálogo nativo del sistema para abrir/inicializar repositorios y definir destino de clonado.
 - Iniciar la autenticación web de `gh` dentro del proceso de Gitzi, sin una consola aparte. GitHub sigue requiriendo que el usuario apruebe la solicitud en el navegador del sistema; un navegador embebido requiere una aplicación OAuth registrada y queda fuera de este alcance.
 
+La actualización T9 organiza las funciones en pestañas **Cambios**, **Sincronizar**, **Historial**, **Ramas**, **Integrar** y **Repositorio**. El transcript de actividad sigue fijo abajo y un resumen permanente arriba identifica el repo, rama, archivos modificados y commits locales por subir/bajar. Ese resumen se refresca automáticamente consultando `git status` local cada 2 segundos; no hace fetch ni consulta la red. Al iniciar Gitzi también se comprueba automáticamente `gh auth status`; la sesión de GitHub sigue siendo opcional para las funciones locales.
+
 La operación remota usa `gh repo create`; no introduce cliente API, aplicación OAuth ni acceso a PRs/issues. La creación de un repositorio público se confirma de forma diferenciada. Un fallo durante push puede dejar creado el repo remoto y se comunica sin intentar borrar recursos.
 
 ### Ampliaciones posteriores
