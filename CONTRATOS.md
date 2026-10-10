@@ -1,6 +1,6 @@
 # Contratos compartidos
 
-Estado: contrato de la Entrega 1. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/domain.rs`, `src/app.rs`, `src/settings.rs` y este documento pertenecen al orquestador.
+Estado: contrato compartido para Entregas 1 y 2. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/domain.rs`, `src/app.rs`, `src/settings.rs` y este documento pertenecen al orquestador.
 
 ## Límites
 
@@ -48,3 +48,38 @@ Estado: contrato de la Entrega 1. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `sr
 ## Dependencia visual
 
 Se fija eframe `0.36.2` tras verificar la documentación oficial. Se desactivan sus features por defecto (incluyen `wgpu`) y se habilitan `glow`, `default_fonts`, `x11` y `wayland`; la app selecciona `Renderer::Glow`. Esta es una primera opción para el prototipo, no una conclusión de rendimiento. eframe 0.36.2 requiere Rust 1.95. El flujo de App en esta versión requiere `App::ui` y permite `logic` antes de cada repintado.
+
+## Entrega 2: cambios y commits
+
+### Dominio compartido (`src/domain.rs`, propiedad T2-APP)
+
+- `RepositoryStatus.has_head: Option<bool>` identifica si el repositorio ya tiene un commit; `None` significa que la respuesta no incluyó ese dato.
+- `DiffArea::{Unstaged, Staged}` selecciona árbol de trabajo contra índice o índice contra HEAD.
+- `FileDiff { path, area, text, binary, truncated }` representa una diferencia de un archivo. La UI muestra estado explícito para binarios y salida truncada.
+- `AppSnapshot.file_diff: Option<FileDiff>` contiene el diff vigente. Una respuesta obsoleta no reemplaza el diff actual.
+- `UiAction` añadirá `InitializeRepository(PathBuf)`, `CloneRepository { source: String, destination: PathBuf }`, `LoadDiff { path: PathBuf, area: DiffArea }`, `StageFile(PathBuf)`, `UnstageFile(PathBuf)` y `Commit(String)`.
+
+### Motor Git (`src/git/**`, propiedad T2-GIT)
+
+- Añadirá operaciones tipadas `InitializeRepository`, `CloneRepository`, `ReadDiff`, `StageFile`, `UnstageFile` y `Commit`, con una variante de resultado por operación.
+- Inicializará con `git init -- <path>` y clonará con `git clone -- <source> <destination>`. El destino no se borra ni se sobrescribe; Git determina si puede clonar ahí.
+- Diff sin preparar: `git --no-optional-locks diff --no-ext-diff --no-textconv --no-color -- <path>`. Diff preparado: misma consulta con `--cached`. Para un archivo untracked, genera el diff contra `/dev/null` con `git diff --no-index`; el código 1 que indica diferencias se considera resultado esperado y se conserva en el registro.
+- Cada flujo de diff se limita a 1 MiB. `binary` y `truncated` comunican el estado real; nunca se presenta salida incompleta como diff completo.
+- Preparar afecta solo el archivo seleccionado, usando `--literal-pathspecs` y `--`. Despreparar conserva el contenido del árbol de trabajo: con HEAD usa `restore --staged`; en un repo sin commits usa `rm --cached` para mantener el archivo en disco.
+- Commit usa solo el índice y recibe el mensaje por stdin (`git commit --file=-`), sin incluirlo en los argumentos ni preparar cambios adicionales. No desactiva hooks ni la firma configurada.
+- Las operaciones se serializan en el worker existente. Tras init/clone y cada mutación, la app consulta de nuevo el estado. Rutas como argumentos separados y literales.
+- Las pruebas mutantes y de flujo usan repositorios temporales. Cubren repo sin commits, binarios, nombres con espacios/Unicode, diffs staged y unstaged separados, stage/unstage y commit que conserva cambios no preparados.
+
+### Interfaz (`src/ui/**`, propiedad T2-UI)
+
+- Añadirá controles funcionales para inicializar, clonar, seleccionar archivo/área de diff, preparar/despreparar un archivo y crear un commit con mensaje.
+- Las acciones incompatibles se deshabilitan mientras el worker está ocupado. Commit se habilita solo con mensaje no vacío y cambios preparados; un primer commit es válido.
+- Un archivo parcialmente preparado puede mostrar a la vez el diff preparado y el no preparado. Esos diffs no se combinan.
+- Identifica un repositorio sin commits y los binarios; informa si el diff está truncado.
+- La UI no ejecuta procesos, no construye comandos y no muestra botones ficticios.
+
+### Integración (`src/app.rs`, propiedad T2-APP)
+
+- Valida acciones contra el repositorio y la lista de archivos vigentes. El estado de carga no bloquea egui.
+- Tras stage/unstage/commit elimina el diff obsoleto y refresca el estado. Tras init/clone abre el destino y realiza la inspección inicial.
+- Commit nunca prepara por su cuenta archivos no preparados. El estado usa `--no-optional-locks`; diffs y mutaciones constan como invocaciones reales en el registro.
