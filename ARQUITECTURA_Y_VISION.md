@@ -78,6 +78,8 @@ Las acciones frecuentes deben estar a mano. Las avanzadas se agrupan en menús c
 - Listas e historial con carga progresiva; diferencias grandes con límites explícitos.
 - Sin animaciones decorativas continuas ni repintado constante en reposo.
 
+La ventana se inicia en 1320×860, con mínimo 960×640 y redimensionamiento habilitado; el contenido se adapta a ventanas más compactas.
+
 No mostrar paneles vacíos como si una función estuviera implementada. Durante el prototipo pueden usarse datos de ejemplo claramente identificados y aislados de los repositorios reales.
 
 ## 5. Alcance funcional por entregas
@@ -213,6 +215,8 @@ La cancelación debe tener en cuenta el proceso y sus hijos en cada plataforma. 
 Respetar las credenciales, agentes SSH, hooks, firma de commits y configuración de Git del usuario. No almacenar contraseñas ni desactivar hooks o firma para hacer que una operación pase.
 
 Los procesos que necesitan interacción no pueden quedar esperando en una consola oculta indefinidamente. La implementación debe definir un mecanismo compatible o fallar con un mensaje accionable. No se prometerá soporte para todos los mecanismos de autenticación antes de probarlos.
+
+GitHub puede usar el credential helper o agente SSH que ya tenga configurado Git. Como atajo opcional de autenticación, Gitzi puede iniciar `gh auth login` en una consola visible y comprobar después el estado con `gh auth status`; la persona completa el flujo interactivo. GitHub CLI no es requisito para el resto de Gitzi. Gitzi no lee ni persiste tokens y no configura globalmente Git sin consentimiento. La integración con APIs de GitHub, pull requests e issues continúa fuera del alcance inicial.
 
 ## 8. Registro de comandos
 

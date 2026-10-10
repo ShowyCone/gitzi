@@ -1,6 +1,30 @@
 # Contratos compartidos
 
-Estado: contratos compartidos para Entregas 1–4. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/domain.rs`, `src/app.rs`, `src/settings.rs` y este documento pertenecen al orquestador.
+## Actualización T6: acceso a GitHub y presentación
+
+### Dominio y aplicación (`src/domain.rs`, `src/app.rs`)
+
+- `GitHubAuthStatus` expresa `Unknown`, `Authenticated`, `Unauthenticated`, `CliUnavailable` o `LoginStarted`; no contiene ni expone tokens.
+- `UiAction::StartGitHubLogin` pide lanzar el flujo interactivo de GitHub CLI; `UiAction::CheckGitHubAuth` consulta el estado guardado por `gh`.
+- `GitOperation::StartGitHubLogin` y `GitOperation::CheckGitHubAuth` son solicitudes sin repositorio. El runner devuelve `GitResult::GitHubLoginStarted` o `GitResult::GitHubAuthChecked { status }` y registra las invocaciones reales.
+- La consulta de estado solo ocurre por `UiAction::CheckGitHubAuth`, al pulsar Verificar sesión; no consulta GitHub en cada arranque. Login y verificación usan el worker en segundo plano; el login solo confirma que abrió la consola. Al volver de la consola, el usuario pulsa Verificar para observar el resultado.
+- `GitHubAuthStatus::CliUnavailable` es un estado visible y accionable; GitHub CLI es opcional para Gitzi y Git/Git Credential Manager/SSH siguen siendo válidos para remotos.
+
+### Runner (`src/git/runner.rs`, propiedad T6-GIT)
+
+- El acceso se inicia con `gh auth login --hostname github.com --web`, con argumentos separados y una consola interactiva visible. La CLI conserva sus prompts para que la persona elija HTTPS/SSH y si desea autenticar las operaciones Git. En Windows se abre una consola nueva; en Linux se usa un emulador de terminal disponible o se devuelve una instrucción concreta para ejecutarlo manualmente.
+- No se usa shell, no se capturan entradas de la consola de login, no se consulta `gh auth token` y ningún token se agrega a salida, registro o estado de Gitzi. Las invocaciones de consulta son `gh auth status --active --hostname github.com` y no incluyen `--show-token`.
+- La falta de `gh` genera `CliUnavailable` en la consulta, y un error al lanzar el flujo produce un error accionable. No se ejecuta `gh auth setup-git` ni se cambia configuración de Git silenciosamente.
+- Solo se autentica github.com mediante GitHub CLI. Las operaciones Git existentes consumen credenciales estándar del usuario; Pull Requests/issues/API de GitHub permanecen fuera del alcance.
+
+### Interfaz (`src/ui/**`, propiedad T6-UI)
+
+- La franja superior incorpora el estado de sesión, el botón funcional **Iniciar sesión con GitHub** y **Verificar sesión**. Los estados `Unknown`, conectado, sin sesión, CLI ausente y consola abierta tienen etiquetas legibles además de señal visual.
+- El texto aclara que se completa el flujo en la consola y se verifica al volver; la UI no solicita ni muestra tokens. Ambos controles respetan el estado ocupado.
+- La ventana de inicio pasa a 1320×860 y conserva el cambio de tamaño; mínimo 960×640 para dar aire al contenido sin impedir usar ventanas compactas.
+- Se conserva el resto de Entregas 1–5 y no se agregan controles sin acción.
+
+Estado: contratos compartidos de Entregas 1–5 y de la actualización T6 descrita arriba. `Cargo.toml`, `Cargo.lock`, `src/main.rs`, `src/domain.rs`, `src/app.rs`, `src/settings.rs` y este documento pertenecen al orquestador.
 
 ## Límites
 

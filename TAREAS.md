@@ -47,3 +47,14 @@ Entrega 4 completa la preferencia persistida de Pull y las opciones explícitas 
 | T5-VERIFY | Agente de verificación | Auditoría final integrada de MVP y límites de plataforma | Sin cambios de producción | T5-UI/T5-DIST integrados | fmt, Clippy, pruebas y build Windows pasan; workflow revisado; plataforma visual/Linux y mediciones se declaran según evidencia | aceptada |
 
 Entrega 5 aceptada después de verificación Windows y revisión independiente. Linux, GUI manual y ejecución remota de Actions quedan pendientes por entorno/remoto ausentes, documentados en `ESTADO_DEL_PROYECTO.md` y `README.md`.
+
+## Actualización solicitada T6 — acceso a GitHub y pulido de ventana
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T6-APP | Orquestador | Estado/actions tipados, coordinación de login/verificación, ventana por defecto y documentación | `src/domain.rs`, `src/app.rs`, `src/main.rs`, `ARQUITECTURA_Y_VISION.md`, `CONTRATOS.md`, `TAREAS.md`, `ESTADO_DEL_PROYECTO.md`, `README.md` | Contrato T6 en `CONTRATOS.md`; runner y UI siguen el contrato ya publicado | Verificación explícita bajo demanda; login/verificación se reflejan en snapshot; inicio 1320×860, mínimo 960×640; documentación distingue gh opcional de Git estándar | aceptada |
+| T6-GIT | Agente de motor | Lanzamiento visible de `gh auth login` y consulta de estado sin secretos | `src/git/runner.rs` | Tipos exactos T6 en `src/domain.rs` y `CONTRATOS.md` | Usa argumentos separados; Windows/Linux muestran interacción o dan instrucción accionable; no captura token ni cambia configuración de Git silenciosamente; comandos registrados; pruebas del parser/estados sin autenticar cuentas reales | aceptada |
+| T6-UI | Agente de interfaz | Botones de acceso/verificación, estados de autenticación y mejoras visuales ligeras | `src/ui/**` | `GitHubAuthStatus`, `UiAction` y contrato T6 ya definidos | Ambos botones invocan actions reales; estado visible en español; mensajes explican consola y verificación; controles responden a busy; conserva flujos D1–D5 | aceptada |
+| T6-VERIFY | Agente de verificación | Revisión independiente del flujo T6 integrado | Sin cambios de producción | T6-APP/T6-GIT/T6-UI integrados | Revisión independiente sin defectos confirmados; fmt, Clippy, 28 pruebas y build Windows pasan; Linux, consola interactiva y GUI visual se declaran sin afirmar verificación | aceptada |
+
+La actualización T6 queda cerrada en Windows tras la revisión independiente. La autenticación real, la conexión del remoto del proyecto y la ejecución remota de Actions requieren completar el flujo/URL del repositorio por el usuario.

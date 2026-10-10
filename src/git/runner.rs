@@ -1,7 +1,7 @@
 use crate::domain::{
     BranchInfo, BranchKind, CommandEntry, CommandStatus, CommitDetail, CommitFileChange,
-    CommitSummary, DiffArea, FileDiff, IntegrationKind, PullPolicy, RefComparison, RemoteInfo,
-    RepositoryStatus, StashDetail, StashEntry,
+    CommitSummary, DiffArea, FileDiff, GitHubAuthStatus, IntegrationKind, PullPolicy,
+    RefComparison, RemoteInfo, RepositoryStatus, StashDetail, StashEntry,
 };
 use std::{
     ffi::OsString,
@@ -19,6 +19,8 @@ static LOG_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitOperation {
     DetectGit,
+    StartGitHubLogin,
+    CheckGitHubAuth,
     InspectRepository(PathBuf),
     InitializeRepository {
         path: PathBuf,
@@ -149,6 +151,10 @@ pub enum GitResult {
     GitDetected {
         version: String,
     },
+    GitHubLoginStarted,
+    GitHubAuthChecked {
+        status: GitHubAuthStatus,
+    },
     RepositoryInspected {
         path: PathBuf,
         status: RepositoryStatus,
@@ -263,6 +269,8 @@ pub struct GitResponse {
 
 pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
     let (result, commands) = match request.operation {
+        GitOperation::StartGitHubLogin => start_github_login(),
+        GitOperation::CheckGitHubAuth => check_github_auth(),
         GitOperation::DetectGit => {
             let (entry, output) = run_git_from_current_dir(&[OsString::from("--version")]);
             let result = match output {
@@ -2060,6 +2068,295 @@ fn successful_mutation(
     }
 }
 
+fn check_github_auth() -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
+    let args = github_auth_status_args();
+    let (entry, output) = run_gh(&args);
+    let status = match &output {
+        Ok(output) if output.stdout.truncated || output.stderr.truncated => Err(GitError {
+            message: "La salida de gh auth status superó el límite de captura de 1 MiB; vuelve a comprobar la sesión.".into(),
+        }),
+        Ok(output) => Ok(github_auth_status_for_exit(output.status.success())),
+        // `gh auth status` returns a non-zero code when there is no active login.
+        Err(error) if is_program_not_found(error) => Ok(GitHubAuthStatus::CliUnavailable),
+        Err(error) => Err(GitError {
+            message: format!("No se pudo consultar GitHub CLI. Comprueba que `gh` esté instalado y en PATH. {error}"),
+        }),
+    };
+    let result = status.map(|status| GitResult::GitHubAuthChecked { status });
+    (result, vec![entry])
+}
+
+fn start_github_login() -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
+    // Fail early with a useful message when `gh` is missing, while logging the
+    // actual version check. The interactive login itself is never captured.
+    let version_args = [OsString::from("--version")];
+    let (version_entry, version) = run_gh(&version_args);
+    let mut commands = vec![version_entry];
+    match version {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let detail = capture_text(&output.stderr).trim().to_owned();
+            let message = if detail.is_empty() {
+                "No se pudo ejecutar GitHub CLI. Instala `gh` y comprueba que esté en PATH.".into()
+            } else {
+                format!(
+                    "No se pudo ejecutar GitHub CLI. Instala `gh` y comprueba que esté en PATH. {detail}"
+                )
+            };
+            return (Err(GitError { message }), commands);
+        }
+        Err(error) if is_program_not_found(&error) => {
+            return (
+                Err(GitError {
+                    message: "GitHub CLI (`gh`) no está instalado o no está en PATH. Instálalo para iniciar sesión con GitHub.".into(),
+                }),
+                commands,
+            );
+        }
+        Err(error) => {
+            return (
+                Err(GitError {
+                    message: format!("No se pudo comprobar GitHub CLI. {error}"),
+                }),
+                commands,
+            );
+        }
+    }
+
+    let login_args = github_login_args();
+    match spawn_visible_login(&login_args) {
+        Ok(entries) => {
+            commands.extend(entries);
+            (Ok(GitResult::GitHubLoginStarted), commands)
+        }
+        Err((entries, message)) => {
+            commands.extend(entries);
+            (Err(GitError { message }), commands)
+        }
+    }
+}
+
+fn github_auth_status_args() -> Vec<OsString> {
+    ["auth", "status", "--active", "--hostname", "github.com"]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+}
+
+fn github_login_args() -> Vec<OsString> {
+    ["auth", "login", "--hostname", "github.com", "--web"]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+}
+
+fn github_auth_status_for_exit(success: bool) -> GitHubAuthStatus {
+    if success {
+        GitHubAuthStatus::Authenticated
+    } else {
+        GitHubAuthStatus::Unauthenticated
+    }
+}
+
+fn is_program_not_found(error: &str) -> bool {
+    error.to_ascii_lowercase().contains("not found")
+        || error.to_ascii_lowercase().contains("cannot find the file")
+        || error
+            .to_ascii_lowercase()
+            .contains("no se encuentra el archivo")
+        || error.contains("NotFound")
+}
+
+#[cfg(windows)]
+fn spawn_visible_login(
+    args: &[OsString],
+) -> Result<Vec<CommandEntry>, (Vec<CommandEntry>, String)> {
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new("gh");
+    command.args(args).creation_flags(0x0000_0010); // CREATE_NEW_CONSOLE
+    let invocation_args = args.to_vec();
+    record_spawn_result("gh", &invocation_args, None, command.spawn())
+        .map(|entry| vec![entry])
+        .map_err(|(entry, message)| (vec![*entry], message))
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_visible_login(
+    args: &[OsString],
+) -> Result<Vec<CommandEntry>, (Vec<CommandEntry>, String)> {
+    let candidates: [(&str, &[&str]); 3] = [
+        ("x-terminal-emulator", &["-e"]),
+        ("gnome-terminal", &["--"]),
+        ("konsole", &["-e"]),
+    ];
+    let mut entries = Vec::new();
+    let mut failures = Vec::new();
+    for (terminal, prefix) in candidates {
+        let mut invocation_args = prefix
+            .iter()
+            .map(|arg| OsString::from(arg))
+            .collect::<Vec<_>>();
+        invocation_args.push(OsString::from("gh"));
+        invocation_args.extend_from_slice(args);
+        let mut command = Command::new(terminal);
+        command
+            .args(&invocation_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match record_spawn_result(terminal, &invocation_args, None, command.spawn()) {
+            Ok(entry) => {
+                entries.push(entry);
+                return Ok(entries);
+            }
+            Err((entry, message)) => {
+                failures.push(message);
+                entries.push(*entry);
+            }
+        }
+    }
+    let reason = failures.join("; ");
+    let message = format!(
+        "No se encontró un emulador de terminal compatible para iniciar el login. Ejecuta manualmente `gh auth login --hostname github.com --web` en una terminal. {reason}"
+    );
+    // Preserve every real failed terminal launch in the response log and put
+    // the actionable aggregate message on the final entry.
+    if let Some(last) = entries.last_mut() {
+        last.stderr = redact_text(&message);
+    }
+    Err((entries, message))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn spawn_visible_login(
+    _args: &[OsString],
+) -> Result<Vec<CommandEntry>, (Vec<CommandEntry>, String)> {
+    let message = "El inicio interactivo está disponible actualmente en Windows y Linux. Ejecuta `gh auth login --hostname github.com --web` en una terminal.".to_owned();
+    let entry = synthetic_launch_failure("gh", &[], message.clone());
+    Err((vec![entry], message))
+}
+
+fn record_spawn_result(
+    executable: &str,
+    args: &[OsString],
+    cwd: Option<PathBuf>,
+    result: std::io::Result<std::process::Child>,
+) -> Result<CommandEntry, (Box<CommandEntry>, String)> {
+    let started_at = SystemTime::now();
+    let display = command_display(executable, args);
+    match result {
+        Ok(_child) => Ok(CommandEntry {
+            id: LOG_ID.fetch_add(1, Ordering::Relaxed),
+            command_display: redact_text(&display),
+            cwd,
+            started_at,
+            duration: Duration::ZERO,
+            status: CommandStatus::Succeeded,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        }),
+        Err(error) => {
+            let message = format!("No se pudo abrir la consola interactiva: {error}");
+            let entry = CommandEntry {
+                id: LOG_ID.fetch_add(1, Ordering::Relaxed),
+                command_display: redact_text(&display),
+                cwd,
+                started_at,
+                duration: Duration::ZERO,
+                status: CommandStatus::Failed,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: redact_text(&message),
+            };
+            Err((Box::new(entry), message))
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn synthetic_launch_failure(executable: &str, args: &[OsString], message: String) -> CommandEntry {
+    CommandEntry {
+        id: LOG_ID.fetch_add(1, Ordering::Relaxed),
+        command_display: redact_text(&command_display(executable, args)),
+        cwd: None,
+        started_at: SystemTime::now(),
+        duration: Duration::ZERO,
+        status: CommandStatus::Failed,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: redact_text(&message),
+    }
+}
+
+fn run_gh(args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
+    let started_at = SystemTime::now();
+    let timer = Instant::now();
+    let display = command_display("gh", args);
+    let mut command = Command::new("gh");
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let outcome = match command.spawn() {
+        Ok(mut child) => {
+            let stdout = child.stdout.take().expect("piped stdout");
+            let stderr = child.stderr.take().expect("piped stderr");
+            let out_thread = thread::spawn(move || read_limited(stdout));
+            let err_thread = thread::spawn(move || read_limited(stderr));
+            let status = child.wait();
+            let out = out_thread
+                .join()
+                .unwrap_or_else(|_| Err("No se pudo leer stdout de GitHub CLI".into()));
+            let err = err_thread
+                .join()
+                .unwrap_or_else(|_| Err("No se pudo leer stderr de GitHub CLI".into()));
+            match (status, out, err) {
+                (Ok(status), Ok(stdout), Ok(stderr)) => Ok(Captured {
+                    stdout,
+                    stderr,
+                    status,
+                }),
+                (Err(error), _, _) => Err(format!("Error esperando GitHub CLI: {error}")),
+                (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+            }
+        }
+        Err(error) => Err(format!("{:?}: {error}", error.kind())),
+    };
+    let duration = timer.elapsed();
+    let (status, exit_code, stdout, stderr) = match &outcome {
+        Ok(output) => (
+            if output.status.success() {
+                CommandStatus::Succeeded
+            } else {
+                CommandStatus::Failed
+            },
+            output.status.code(),
+            redact_text(&capture_text(&output.stdout)),
+            redact_text(&capture_text(&output.stderr)),
+        ),
+        Err(error) => (
+            CommandStatus::Failed,
+            None,
+            String::new(),
+            redact_text(error),
+        ),
+    };
+    let entry = CommandEntry {
+        id: LOG_ID.fetch_add(1, Ordering::Relaxed),
+        command_display: redact_text(&display),
+        cwd: std::env::current_dir().ok(),
+        started_at,
+        duration,
+        status,
+        exit_code,
+        stdout,
+        stderr,
+    };
+    (entry, outcome)
+}
+
 fn run_git_from_current_dir(args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
     match std::env::current_dir() {
         Ok(cwd) => run_git(&cwd, args),
@@ -2376,6 +2673,34 @@ mod tests {
             generation: 7,
             operation,
         })
+    }
+
+    #[test]
+    fn github_auth_commands_are_argument_arrays_without_token_access() {
+        let status = github_auth_status_args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            status,
+            ["auth", "status", "--active", "--hostname", "github.com"]
+        );
+        let login = github_login_args()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            login,
+            ["auth", "login", "--hostname", "github.com", "--web"]
+        );
+        assert_eq!(
+            github_auth_status_for_exit(true),
+            GitHubAuthStatus::Authenticated
+        );
+        assert_eq!(
+            github_auth_status_for_exit(false),
+            GitHubAuthStatus::Unauthenticated
+        );
     }
 
     #[test]

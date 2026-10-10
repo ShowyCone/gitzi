@@ -126,6 +126,16 @@ pub enum CommandStatus {
     Failed,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum GitHubAuthStatus {
+    #[default]
+    Unknown,
+    Authenticated,
+    Unauthenticated,
+    CliUnavailable,
+    LoginStarted,
+}
+
 #[derive(Clone, Debug)]
 pub struct CommandEntry {
     pub id: u64,
@@ -143,6 +153,7 @@ pub struct CommandEntry {
 pub struct AppSnapshot {
     pub git_checked: bool,
     pub git_version: Option<String>,
+    pub github_auth_status: GitHubAuthStatus,
     pub active_repo: Option<PathBuf>,
     pub repository: Option<RepositoryStatus>,
     pub busy: bool,
@@ -164,6 +175,8 @@ pub struct AppSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiAction {
+    StartGitHubLogin,
+    CheckGitHubAuth,
     OpenRepository(PathBuf),
     Refresh,
     InitializeRepository(PathBuf),

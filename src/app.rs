@@ -3,7 +3,9 @@ use std::{collections::HashMap, path::PathBuf, time::Duration};
 use eframe::egui;
 
 use crate::{
-    domain::{AppSnapshot, BranchKind, CommandEntry, DiffArea, FileStatus, UiAction},
+    domain::{
+        AppSnapshot, BranchKind, CommandEntry, DiffArea, FileStatus, GitHubAuthStatus, UiAction,
+    },
     git::{GitOperation, GitRequest, GitResult, GitWorker},
     settings,
     ui::{self, UiState},
@@ -114,6 +116,12 @@ impl GitziApp {
         }
 
         match action {
+            UiAction::StartGitHubLogin => {
+                self.submit(GitOperation::StartGitHubLogin, 0);
+            }
+            UiAction::CheckGitHubAuth => {
+                self.submit(GitOperation::CheckGitHubAuth, 0);
+            }
             UiAction::OpenRepository(path) => {
                 self.generation = self.generation.saturating_add(1);
                 self.snapshot.active_repo = Some(path.clone());
@@ -755,6 +763,12 @@ impl GitziApp {
                 Ok(GitResult::GitDetected { version }) => {
                     self.snapshot.git_checked = true;
                     self.snapshot.git_version = Some(version);
+                }
+                Ok(GitResult::GitHubLoginStarted) => {
+                    self.snapshot.github_auth_status = GitHubAuthStatus::LoginStarted;
+                }
+                Ok(GitResult::GitHubAuthChecked { status }) => {
+                    self.snapshot.github_auth_status = status;
                 }
                 Ok(GitResult::RepositoryInspected { path, status }) => {
                     if self.snapshot.active_repo.as_ref() != Some(&path) {

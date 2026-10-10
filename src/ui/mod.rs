@@ -7,7 +7,7 @@ use eframe::egui;
 
 use crate::domain::{
     AppSnapshot, BranchInfo, BranchKind, CommandEntry, CommandStatus, DiffArea, FileStatus,
-    IntegrationKind, PullPolicy, UiAction,
+    GitHubAuthStatus, IntegrationKind, PullPolicy, UiAction,
 };
 
 #[derive(Clone, Debug)]
@@ -127,6 +127,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                             );
                         }
                     });
+
+                    ui.add_space(8.0);
+                    render_github_login(ui, snapshot, can_act, &mut action);
 
                     ui.add_space(10.0);
                     ui.horizontal_wrapped(|ui| {
@@ -416,6 +419,60 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
             }
         });
     action
+}
+
+fn render_github_login(
+    ui: &mut egui::Ui,
+    snapshot: &AppSnapshot,
+    can_act: bool,
+    action: &mut Option<UiAction>,
+) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("GitHub").strong());
+            let (status, color) = match &snapshot.github_auth_status {
+                GitHubAuthStatus::Unknown => (
+                    "Estado sin verificar",
+                    ui.visuals().weak_text_color(),
+                ),
+                GitHubAuthStatus::Authenticated => {
+                    ("Sesión iniciada", egui::Color32::from_rgb(117, 220, 173))
+                }
+                GitHubAuthStatus::Unauthenticated => {
+                    ("Sin sesión", ui.visuals().warn_fg_color)
+                }
+                GitHubAuthStatus::CliUnavailable => {
+                    ("GitHub CLI no disponible", ui.visuals().warn_fg_color)
+                }
+                GitHubAuthStatus::LoginStarted => (
+                    "Completa el acceso en la consola",
+                    ui.visuals().weak_text_color(),
+                ),
+            };
+            ui.label(egui::RichText::new(status).color(color));
+
+            let start = ui.add_enabled(
+                can_act && action.is_none(),
+                egui::Button::new("Iniciar sesión con GitHub"),
+            );
+            if start.clicked() {
+                *action = Some(UiAction::StartGitHubLogin);
+            }
+            let verify = ui.add_enabled(
+                can_act && action.is_none(),
+                egui::Button::new("Verificar sesión"),
+            );
+            if verify.clicked() {
+                *action = Some(UiAction::CheckGitHubAuth);
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "El inicio se completa en la consola. Al volver, verifica la sesión aquí. GitHub CLI es opcional para las funciones Git.",
+            )
+            .weak(),
+        );
+    });
 }
 
 fn apply_theme(ui: &mut egui::Ui) {
