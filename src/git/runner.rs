@@ -1,12 +1,12 @@
-use crate::domain::{CommandEntry, CommandStatus, RepositoryStatus};
+use crate::domain::{CommandEntry, CommandStatus, DiffArea, FileDiff, RepositoryStatus};
 use std::{
     ffi::OsString,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
-    time::{Instant, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
@@ -16,6 +16,32 @@ static LOG_ID: AtomicU64 = AtomicU64::new(1);
 pub enum GitOperation {
     DetectGit,
     InspectRepository(PathBuf),
+    InitializeRepository {
+        path: PathBuf,
+    },
+    CloneRepository {
+        source: String,
+        destination: PathBuf,
+    },
+    ReadDiff {
+        repository: PathBuf,
+        path: PathBuf,
+        area: DiffArea,
+        untracked: bool,
+    },
+    StageFile {
+        repository: PathBuf,
+        path: PathBuf,
+    },
+    UnstageFile {
+        repository: PathBuf,
+        path: PathBuf,
+        has_head: bool,
+    },
+    Commit {
+        repository: PathBuf,
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +59,24 @@ pub enum GitResult {
     RepositoryInspected {
         path: PathBuf,
         status: RepositoryStatus,
+    },
+    RepositoryInitialized {
+        path: PathBuf,
+    },
+    RepositoryCloned {
+        path: PathBuf,
+    },
+    DiffLoaded {
+        diff: FileDiff,
+    },
+    FileStaged {
+        path: PathBuf,
+    },
+    FileUnstaged {
+        path: PathBuf,
+    },
+    CommitCreated {
+        path: PathBuf,
     },
 }
 
@@ -52,7 +96,7 @@ pub struct GitResponse {
 pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
     let (result, commands) = match request.operation {
         GitOperation::DetectGit => {
-            let (entry, output) = run_git(None, &[OsString::from("--version")]);
+            let (entry, output) = run_git_from_current_dir(&[OsString::from("--version")]);
             let result = match output {
                 Ok(output) if output.stdout.truncated => Err(GitError {
                     message: "La salida de git --version superó el límite de captura de 1 MiB."
@@ -88,7 +132,7 @@ pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
             .into_iter()
             .map(OsString::from)
             .collect::<Vec<_>>();
-            let (entry, output) = run_git(Some(&path), &args);
+            let (entry, output) = run_git(&path, &args);
             let result = match output {
                 Ok(output) if output.stdout.truncated => Err(GitError {
                     message: "La salida de git status superó el límite de captura de 1 MiB; el estado está incompleto.".into(),
@@ -100,6 +144,154 @@ pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
                 Ok(output) => Err(command_error("No se pudo consultar el repositorio; comprueba que la ruta sea válida y que Git tenga acceso", &entry, &output.stderr)),
                 Err(error) => Err(GitError { message: format!("No se pudo ejecutar Git para consultar {}. Comprueba que Git esté instalado y que la ruta sea accesible. {error}", path.display()) }),
             };
+            (result, vec![entry])
+        }
+        GitOperation::InitializeRepository { path } => {
+            let args = vec!["init".into(), "--".into(), path.as_os_str().to_owned()];
+            let (entry, output) = run_git_from_current_dir(&args);
+            let result =
+                successful_mutation(output, &entry, "No se pudo inicializar el repositorio")
+                    .map(|()| GitResult::RepositoryInitialized { path });
+            (result, vec![entry])
+        }
+        GitOperation::CloneRepository {
+            source,
+            destination,
+        } => {
+            let args = vec![
+                "clone".into(),
+                "--".into(),
+                source.into(),
+                destination.as_os_str().to_owned(),
+            ];
+            let (entry, output) = run_git_from_current_dir(&args);
+            let result = successful_mutation(output, &entry, "No se pudo clonar el repositorio")
+                .map(|()| GitResult::RepositoryCloned { path: destination });
+            (result, vec![entry])
+        }
+        GitOperation::ReadDiff {
+            repository,
+            path,
+            area,
+            untracked,
+        } => {
+            let mut args = vec![
+                OsString::from("--no-optional-locks"),
+                OsString::from("--literal-pathspecs"),
+                OsString::from("diff"),
+            ];
+            if untracked {
+                args.extend(
+                    [
+                        "--no-index",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--no-color",
+                        "--",
+                        "/dev/null",
+                    ]
+                    .into_iter()
+                    .map(OsString::from),
+                );
+                args.push(path.as_os_str().to_owned());
+            } else {
+                args.extend(
+                    ["--no-ext-diff", "--no-textconv", "--no-color"]
+                        .into_iter()
+                        .map(OsString::from),
+                );
+                if area == DiffArea::Staged {
+                    args.push("--cached".into());
+                }
+                args.push("--".into());
+                args.push(path.as_os_str().to_owned());
+            }
+            let (mut entry, output) = run_git(&repository, &args);
+            let result = match output {
+                Ok(output)
+                    if output.status.success()
+                        || (untracked
+                            && output.status.code() == Some(1)
+                            && output.stderr.bytes.is_empty()) =>
+                {
+                    if untracked && output.status.code() == Some(1) {
+                        entry.status = CommandStatus::SucceededWithDifferences;
+                    }
+                    let text = capture_text(&output.stdout);
+                    let binary = text
+                        .lines()
+                        .any(|line| line.starts_with("Binary files ") && line.contains(" differ"))
+                        || text.contains("GIT binary patch");
+                    Ok(GitResult::DiffLoaded {
+                        diff: FileDiff {
+                            repository,
+                            path,
+                            area,
+                            text,
+                            binary,
+                            truncated: output.stdout.truncated,
+                        },
+                    })
+                }
+                Ok(output) => Err(command_error(
+                    "No se pudo leer el diff",
+                    &entry,
+                    &output.stderr,
+                )),
+                Err(error) => Err(GitError {
+                    message: format!("No se pudo ejecutar Git para leer el diff. {error}"),
+                }),
+            };
+            (result, vec![entry])
+        }
+        GitOperation::StageFile { repository, path } => {
+            let args = vec![
+                "--literal-pathspecs".into(),
+                "add".into(),
+                "--".into(),
+                path.as_os_str().to_owned(),
+            ];
+            let (entry, output) = run_git(&repository, &args);
+            let result = successful_mutation(output, &entry, "No se pudo preparar el archivo")
+                .map(|()| GitResult::FileStaged { path });
+            (result, vec![entry])
+        }
+        GitOperation::UnstageFile {
+            repository,
+            path,
+            has_head,
+        } => {
+            let args = if has_head {
+                vec![
+                    "--literal-pathspecs".into(),
+                    "restore".into(),
+                    "--staged".into(),
+                    "--".into(),
+                    path.as_os_str().to_owned(),
+                ]
+            } else {
+                vec![
+                    "--literal-pathspecs".into(),
+                    "rm".into(),
+                    "--cached".into(),
+                    "--".into(),
+                    path.as_os_str().to_owned(),
+                ]
+            };
+            let (entry, output) = run_git(&repository, &args);
+            let result =
+                successful_mutation(output, &entry, "No se pudo quitar el archivo del índice")
+                    .map(|()| GitResult::FileUnstaged { path });
+            (result, vec![entry])
+        }
+        GitOperation::Commit {
+            repository,
+            message,
+        } => {
+            let args = vec!["commit".into(), "--file=-".into()];
+            let (entry, output) = run_git_with_input(&repository, &args, Some(message.as_bytes()));
+            let result = successful_mutation(output, &entry, "No se pudo crear el commit")
+                .map(|()| GitResult::CommitCreated { path: repository });
             (result, vec![entry])
         }
     };
@@ -131,7 +323,61 @@ fn parse_status_output(stdout: &CapturedStream) -> Result<RepositoryStatus, GitE
     })
 }
 
-fn run_git(cwd: Option<&Path>, args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
+fn successful_mutation(
+    output: Result<Captured, String>,
+    entry: &CommandEntry,
+    context: &str,
+) -> Result<(), GitError> {
+    match output {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(command_error(context, entry, &output.stderr)),
+        Err(error) => Err(GitError {
+            message: format!("{context}. {error}"),
+        }),
+    }
+}
+
+fn run_git_from_current_dir(args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
+    match std::env::current_dir() {
+        Ok(cwd) => run_git(&cwd, args),
+        Err(error) => {
+            let message = format!(
+                "No se pudo obtener el directorio de trabajo actual para ejecutar Git: {error}"
+            );
+            failed_without_process(args, message)
+        }
+    }
+}
+
+fn failed_without_process(
+    args: &[OsString],
+    message: String,
+) -> (CommandEntry, Result<Captured, String>) {
+    let started_at = SystemTime::now();
+    let display = command_display("git", args);
+    let entry = CommandEntry {
+        id: LOG_ID.fetch_add(1, Ordering::Relaxed),
+        command_display: redact_text(&display),
+        cwd: None,
+        started_at,
+        duration: Duration::ZERO,
+        status: CommandStatus::Failed,
+        exit_code: None,
+        stdout: String::new(),
+        stderr: redact_text(&message),
+    };
+    (entry, Err(message))
+}
+
+fn run_git(cwd: &Path, args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
+    run_git_with_input(cwd, args, None)
+}
+
+fn run_git_with_input(
+    cwd: &Path,
+    args: &[OsString],
+    input: Option<&[u8]>,
+) -> (CommandEntry, Result<Captured, String>) {
     let started_at = SystemTime::now();
     let timer = Instant::now();
     let display = command_display("git", args);
@@ -140,9 +386,12 @@ fn run_git(cwd: Option<&Path>, args: &[OsString]) -> (CommandEntry, Result<Captu
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
+    command.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    command.current_dir(cwd);
     let launched = command.spawn();
     let outcome = match launched {
         Ok(mut child) => {
@@ -150,6 +399,14 @@ fn run_git(cwd: Option<&Path>, args: &[OsString]) -> (CommandEntry, Result<Captu
             let stderr = child.stderr.take().expect("piped stderr");
             let out_thread = thread::spawn(move || read_limited(stdout));
             let err_thread = thread::spawn(move || read_limited(stderr));
+            let write_input = if let Some(input) = input {
+                match child.stdin.take().expect("piped stdin").write_all(input) {
+                    Ok(()) => Ok(()),
+                    Err(error) => Err(format!("Error enviando entrada a Git: {error}")),
+                }
+            } else {
+                Ok(())
+            };
             let status = child.wait();
             let out = out_thread
                 .join()
@@ -157,14 +414,14 @@ fn run_git(cwd: Option<&Path>, args: &[OsString]) -> (CommandEntry, Result<Captu
             let err = err_thread
                 .join()
                 .unwrap_or_else(|_| Err("No se pudo leer stderr".into()));
-            match (status, out, err) {
-                (Ok(status), Ok(stdout), Ok(stderr)) => Ok(Captured {
+            match (status, out, err, write_input) {
+                (Ok(status), Ok(stdout), Ok(stderr), Ok(())) => Ok(Captured {
                     stdout,
                     stderr,
                     status,
                 }),
-                (Err(error), _, _) => Err(format!("Error esperando el proceso: {error}")),
-                (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+                (Err(error), _, _, _) => Err(format!("Error esperando el proceso: {error}")),
+                (_, Err(error), _, _) | (_, _, Err(error), _) | (_, _, _, Err(error)) => Err(error),
             }
         }
         Err(error) => Err(format!("{error}")),
@@ -191,7 +448,7 @@ fn run_git(cwd: Option<&Path>, args: &[OsString]) -> (CommandEntry, Result<Captu
     let entry = CommandEntry {
         id: LOG_ID.fetch_add(1, Ordering::Relaxed),
         command_display: redact_text(&display),
-        cwd: cwd.map(Path::to_path_buf),
+        cwd: Some(cwd.to_path_buf()),
         started_at,
         duration,
         status,

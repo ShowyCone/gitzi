@@ -11,6 +11,12 @@ pub(super) fn parse_status(bytes: &[u8]) -> Result<RepositoryStatus, String> {
             let header = String::from_utf8_lossy(field);
             if let Some(value) = header.strip_prefix("# branch.head ") {
                 status.branch = value.to_owned();
+            } else if let Some(value) = header.strip_prefix("# branch.oid ") {
+                status.has_head = if value.is_empty() {
+                    None
+                } else {
+                    Some(value != "(initial)" && !value.bytes().all(|byte| byte == b'0'))
+                };
             } else if let Some(value) = header.strip_prefix("# branch.upstream ") {
                 status.upstream = Some(value.to_owned());
             } else if let Some(value) = header.strip_prefix("# branch.ab ") {
@@ -32,6 +38,7 @@ pub(super) fn parse_status(bytes: &[u8]) -> Result<RepositoryStatus, String> {
                     path: path_from_bytes(record[8]),
                     index_status: record[1][0] as char,
                     worktree_status: record[1][1] as char,
+                    unmerged: false,
                 });
             }
             Some(b'2') => {
@@ -43,6 +50,16 @@ pub(super) fn parse_status(bytes: &[u8]) -> Result<RepositoryStatus, String> {
                     path,
                     index_status: record[1][0] as char,
                     worktree_status: record[1][1] as char,
+                    unmerged: false,
+                });
+            }
+            Some(b'u') => {
+                let record = split_fields(field, 11)?;
+                status.files.push(FileStatus {
+                    path: path_from_bytes(record[10]),
+                    index_status: record[1][0] as char,
+                    worktree_status: record[1][1] as char,
+                    unmerged: true,
                 });
             }
             Some(b'?') => {
@@ -53,6 +70,7 @@ pub(super) fn parse_status(bytes: &[u8]) -> Result<RepositoryStatus, String> {
                     path: path_from_bytes(path),
                     index_status: '?',
                     worktree_status: '?',
+                    unmerged: false,
                 });
             }
             Some(b'!') => {} // ignored records are absent unless explicitly requested
@@ -112,6 +130,55 @@ mod tests {
         assert_eq!(status.upstream.as_deref(), Some("origin/feature/x"));
         assert_eq!((status.ahead, status.behind), (3, 2));
         assert_eq!(status.files[0].path, PathBuf::from("archivo nuevo ñ.txt"));
+    }
+
+    #[test]
+    fn identifies_head_from_branch_oid() {
+        assert_eq!(
+            parse_status(b"# branch.oid (initial)\0# branch.head main\0")
+                .unwrap()
+                .has_head,
+            Some(false)
+        );
+        assert_eq!(
+            parse_status(
+                b"# branch.oid 0000000000000000000000000000000000000000\0# branch.head main\0"
+            )
+            .unwrap()
+            .has_head,
+            Some(false)
+        );
+        assert_eq!(
+            parse_status(b"# branch.oid abc123\0# branch.head main\0")
+                .unwrap()
+                .has_head,
+            Some(true)
+        );
+        assert_eq!(
+            parse_status(b"# branch.head main\0").unwrap().has_head,
+            None
+        );
+        assert_eq!(
+            parse_status(b"# branch.oid \0# branch.head main\0")
+                .unwrap()
+                .has_head,
+            None
+        );
+    }
+
+    #[test]
+    fn parses_unmerged_records_and_preserves_both_status_characters() {
+        let status = parse_status(b"# branch.oid abc123\0# branch.head main\0u UU N... 100644 100644 100644 100644 1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 3333333333333333333333333333333333333333 conflicted file.txt\0").unwrap();
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, PathBuf::from("conflicted file.txt"));
+        assert_eq!(
+            (
+                status.files[0].index_status,
+                status.files[0].worktree_status
+            ),
+            ('U', 'U')
+        );
+        assert!(status.files[0].unmerged);
     }
 
     #[test]

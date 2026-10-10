@@ -5,16 +5,44 @@ use std::{
 
 use eframe::egui;
 
-use crate::domain::{AppSnapshot, CommandEntry, CommandStatus, UiAction};
+use crate::domain::{AppSnapshot, CommandEntry, CommandStatus, DiffArea, FileStatus, UiAction};
 
-#[derive(Default)]
 pub struct UiState {
     repository_path: String,
+    clone_source: String,
+    clone_destination: String,
+    active_repository: Option<PathBuf>,
+    selected_file: Option<PathBuf>,
+    selected_area: DiffArea,
+    requested_diff: Option<(PathBuf, PathBuf, DiffArea)>,
+    commit_message: String,
     command_log_open: bool,
     copied_command: Option<u64>,
 }
 
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            repository_path: String::new(),
+            clone_source: String::new(),
+            clone_destination: String::new(),
+            active_repository: None,
+            selected_file: None,
+            selected_area: DiffArea::Unstaged,
+            requested_diff: None,
+            commit_message: String::new(),
+            command_log_open: false,
+            copied_command: None,
+        }
+    }
+}
+
 pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) -> Option<UiAction> {
+    if state.active_repository != snapshot.active_repo {
+        state.active_repository = snapshot.active_repo.clone();
+        state.selected_file = None;
+        state.requested_diff = None;
+    }
     let available = snapshot.git_checked && snapshot.git_version.is_some();
     let can_act = available && !snapshot.busy;
     let mut action = None;
@@ -69,6 +97,45 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                     action = Some(UiAction::OpenRepository(PathBuf::from(
                         &state.repository_path,
                     )));
+                }
+            });
+            ui.horizontal(|ui| {
+                let initialize = ui
+                    .add_enabled(
+                        can_act && !state.repository_path.trim().is_empty(),
+                        egui::Button::new("Inicializar"),
+                    )
+                    .on_hover_text("Crear un repositorio Git en esta ruta");
+                if initialize.clicked() && action.is_none() {
+                    action = Some(UiAction::InitializeRepository(PathBuf::from(
+                        &state.repository_path,
+                    )));
+                }
+            });
+            ui.separator();
+            ui.label(egui::RichText::new("Clonar repositorio").strong());
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.clone_source)
+                        .hint_text("URL o ruta de origen")
+                        .desired_width((ui.available_width() * 0.55).max(140.0)),
+                );
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.clone_destination)
+                        .hint_text("Destino local")
+                        .desired_width((ui.available_width() - 72.0).max(140.0)),
+                );
+                let clone = ui.add_enabled(
+                    can_act
+                        && !state.clone_source.trim().is_empty()
+                        && !state.clone_destination.trim().is_empty(),
+                    egui::Button::new("Clonar"),
+                );
+                if clone.clicked() && action.is_none() {
+                    action = Some(UiAction::CloneRepository {
+                        source: state.clone_source.clone(),
+                        destination: PathBuf::from(&state.clone_destination),
+                    });
                 }
             });
         });
@@ -127,6 +194,13 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
 
     match (&snapshot.active_repo, &snapshot.repository) {
         (Some(path), Some(repository)) => {
+            if state
+                .selected_file
+                .as_ref()
+                .is_none_or(|selected| !repository.files.iter().any(|file| &file.path == selected))
+            {
+                state.selected_file = repository.files.first().map(|file| file.path.clone());
+            }
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
@@ -159,6 +233,15 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                         ui.separator();
                         ui.label(format!("↑ {} · ↓ {}", repository.ahead, repository.behind));
                     }
+                    if repository.has_head == Some(false) {
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(
+                                "Repositorio sin commits · primer commit disponible",
+                            )
+                            .color(ui.visuals().warn_fg_color),
+                        );
+                    }
                 });
             });
             ui.add_space(8.0);
@@ -179,18 +262,62 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                     .show(ui, |ui| {
                         egui::Grid::new("file_status_grid")
                             .striped(true)
-                            .num_columns(2)
+                            .num_columns(4)
                             .spacing(egui::vec2(14.0, 5.0))
                             .show(ui, |ui| {
                                 for file in &repository.files {
+                                    let selected = state.selected_file.as_ref() == Some(&file.path);
+                                    let select = ui.selectable_label(
+                                        selected,
+                                        file.path.display().to_string(),
+                                    );
+                                    if select.clicked() {
+                                        state.selected_file = Some(file.path.clone());
+                                        state.selected_area = preferred_area(file);
+                                        state.requested_diff = None;
+                                        if action.is_none() {
+                                            let area = state.selected_area;
+                                            action = Some(request_diff(
+                                                state,
+                                                snapshot,
+                                                file.path.clone(),
+                                                area,
+                                            ));
+                                        }
+                                    }
                                     let status =
                                         format!("{}{}", file.index_status, file.worktree_status);
                                     ui.monospace(egui::RichText::new(status).strong());
-                                    ui.label(file.path.display().to_string());
+                                    if ui
+                                        .add_enabled(
+                                            can_act && has_unstaged(file),
+                                            egui::Button::new("Preparar"),
+                                        )
+                                        .clicked()
+                                        && action.is_none()
+                                    {
+                                        action = Some(UiAction::StageFile(file.path.clone()));
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            can_act
+                                                && has_staged(file)
+                                                && repository.has_head.is_some(),
+                                            egui::Button::new("Deshacer preparación"),
+                                        )
+                                        .clicked()
+                                        && action.is_none()
+                                    {
+                                        action = Some(UiAction::UnstageFile(file.path.clone()));
+                                    }
                                     ui.end_row();
                                 }
                             });
                     });
+                ui.add_space(8.0);
+                render_file_review(ui, state, snapshot, &repository.files, can_act, &mut action);
+                ui.add_space(10.0);
+                render_commit(ui, state, snapshot, can_act, &mut action);
             }
         }
         (Some(path), None) => {
@@ -264,6 +391,206 @@ fn loading_state(ui: &mut egui::Ui, text: &str) {
     });
 }
 
+fn render_file_review(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    snapshot: &AppSnapshot,
+    files: &[FileStatus],
+    can_act: bool,
+    action: &mut Option<UiAction>,
+) {
+    let Some(path) = state.selected_file.clone() else {
+        return;
+    };
+    let Some(file) = files.iter().find(|file| file.path == path) else {
+        return;
+    };
+
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Revisar archivo");
+            ui.label(egui::RichText::new(path.display().to_string()).weak());
+        });
+        ui.horizontal(|ui| {
+            let unstaged = ui.add_enabled(
+                can_act && has_unstaged(file),
+                egui::Button::selectable(state.selected_area == DiffArea::Unstaged, "Sin preparar"),
+            );
+            if unstaged.clicked() {
+                state.selected_area = DiffArea::Unstaged;
+                if can_act && action.is_none() {
+                    *action = Some(request_diff(
+                        state,
+                        snapshot,
+                        path.clone(),
+                        DiffArea::Unstaged,
+                    ));
+                } else {
+                    state.requested_diff = None;
+                }
+            }
+            let staged = ui.add_enabled(
+                can_act && has_staged(file),
+                egui::Button::selectable(state.selected_area == DiffArea::Staged, "Preparado"),
+            );
+            if staged.clicked() {
+                state.selected_area = DiffArea::Staged;
+                if can_act && action.is_none() {
+                    *action = Some(request_diff(
+                        state,
+                        snapshot,
+                        path.clone(),
+                        DiffArea::Staged,
+                    ));
+                } else {
+                    state.requested_diff = None;
+                }
+            }
+            let load = ui.add_enabled(
+                can_act && area_available(file, state.selected_area),
+                egui::Button::new("Cargar diff"),
+            );
+            if load.clicked() && action.is_none() {
+                *action = Some(request_diff(
+                    state,
+                    snapshot,
+                    path.clone(),
+                    state.selected_area,
+                ));
+            }
+        });
+
+        if !area_available(file, state.selected_area) {
+            ui.label(egui::RichText::new("No hay cambios en esta área para el archivo.").weak());
+            return;
+        }
+        match snapshot.file_diff.as_ref().filter(|diff| {
+            snapshot.active_repo.as_ref() == Some(&diff.repository)
+                && diff.path == path
+                && diff.area == state.selected_area
+                && state
+                    .requested_diff
+                    .as_ref()
+                    .is_some_and(|(repository, file, area)| {
+                        repository == &diff.repository && file == &diff.path && *area == diff.area
+                    })
+        }) {
+            Some(diff) if diff.binary => {
+                ui.label(
+                    egui::RichText::new("Archivo binario · Git no proporciona diff de texto.")
+                        .strong()
+                        .color(ui.visuals().warn_fg_color),
+                );
+                if diff.truncated {
+                    ui.label(
+                        egui::RichText::new("La salida del diff está truncada.")
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                }
+            }
+            Some(diff) => {
+                if diff.truncated {
+                    ui.label(
+                        egui::RichText::new("Diff truncado: la salida está incompleta.")
+                            .color(ui.visuals().warn_fg_color),
+                    );
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt(("file_diff", path.clone(), state.selected_area as u8))
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        ui.monospace(&diff.text);
+                    });
+            }
+            None => {
+                ui.label(egui::RichText::new("Carga el diff para revisar este archivo.").weak());
+            }
+        }
+    });
+}
+
+fn render_commit(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    snapshot: &AppSnapshot,
+    can_act: bool,
+    action: &mut Option<UiAction>,
+) {
+    let has_staged = snapshot
+        .repository
+        .as_ref()
+        .is_some_and(|repository| repository.files.iter().any(has_staged));
+    let has_conflicts = snapshot.repository.as_ref().is_some_and(|repository| {
+        repository
+            .files
+            .iter()
+            .any(|file| file.unmerged || file.index_status == 'U' || file.worktree_status == 'U')
+    });
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(egui::RichText::new("Crear commit").strong());
+        ui.add(
+            egui::TextEdit::multiline(&mut state.commit_message)
+                .hint_text("Mensaje del commit")
+                .desired_rows(2),
+        );
+        let commit = ui.add_enabled(
+            can_act && has_staged && !has_conflicts && !state.commit_message.trim().is_empty(),
+            egui::Button::new("Crear commit"),
+        );
+        if commit.clicked() && action.is_none() {
+            *action = Some(UiAction::Commit(state.commit_message.clone()));
+        }
+        if has_conflicts {
+            ui.label(
+                egui::RichText::new("Resuelve los conflictos antes de crear un commit.")
+                    .color(ui.visuals().warn_fg_color),
+            );
+        }
+        if !has_staged {
+            ui.label(
+                egui::RichText::new("Prepara al menos un archivo para crear un commit.").weak(),
+            );
+        }
+    });
+}
+
+fn preferred_area(file: &FileStatus) -> DiffArea {
+    if has_unstaged(file) {
+        DiffArea::Unstaged
+    } else {
+        DiffArea::Staged
+    }
+}
+
+fn has_unstaged(file: &FileStatus) -> bool {
+    file.worktree_status != '.'
+}
+
+fn has_staged(file: &FileStatus) -> bool {
+    file.index_status != '.' && file.index_status != '?'
+}
+
+fn area_available(file: &FileStatus, area: DiffArea) -> bool {
+    match area {
+        DiffArea::Unstaged => has_unstaged(file),
+        DiffArea::Staged => has_staged(file),
+    }
+}
+
+fn request_diff(
+    state: &mut UiState,
+    snapshot: &AppSnapshot,
+    path: PathBuf,
+    area: DiffArea,
+) -> UiAction {
+    if let Some(repository) = &snapshot.active_repo {
+        state.requested_diff = Some((repository.clone(), path.clone(), area));
+    } else {
+        state.requested_diff = None;
+    }
+    UiAction::LoadDiff { path, area }
+}
+
 fn empty_state(ui: &mut egui::Ui, title: &str, detail: &str) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.vertical(|ui| {
@@ -279,10 +606,13 @@ fn command_entry(ui: &mut egui::Ui, state: &mut UiState, entry: &CommandEntry) {
             ui.label(
                 egui::RichText::new(match entry.status {
                     CommandStatus::Succeeded => "Correcto",
+                    CommandStatus::SucceededWithDifferences => "Correcto · con diferencias",
                     CommandStatus::Failed => "Falló",
                 })
                 .color(match entry.status {
-                    CommandStatus::Succeeded => ui.visuals().strong_text_color(),
+                    CommandStatus::Succeeded | CommandStatus::SucceededWithDifferences => {
+                        ui.visuals().strong_text_color()
+                    }
                     CommandStatus::Failed => ui.visuals().error_fg_color,
                 })
                 .strong(),
@@ -338,4 +668,45 @@ fn format_start_time(time: SystemTime) -> String {
         (seconds_of_day / 60) % 60,
         seconds_of_day % 60
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_staged, has_unstaged};
+    use crate::domain::FileStatus;
+    use std::path::PathBuf;
+
+    #[test]
+    fn status_sentinels_distinguish_clean_and_untracked_files() {
+        let clean = FileStatus {
+            path: PathBuf::from("clean.txt"),
+            index_status: '.',
+            worktree_status: '.',
+            unmerged: false,
+        };
+        let untracked = FileStatus {
+            path: PathBuf::from("new.txt"),
+            index_status: '?',
+            worktree_status: '?',
+            unmerged: false,
+        };
+
+        assert!(!has_staged(&clean));
+        assert!(!has_unstaged(&clean));
+        assert!(!has_staged(&untracked));
+        assert!(has_unstaged(&untracked));
+    }
+
+    #[test]
+    fn staged_and_unstaged_changes_can_coexist() {
+        let partially_staged = FileStatus {
+            path: PathBuf::from("changed.txt"),
+            index_status: 'M',
+            worktree_status: 'M',
+            unmerged: false,
+        };
+
+        assert!(has_staged(&partially_staged));
+        assert!(has_unstaged(&partially_staged));
+    }
 }

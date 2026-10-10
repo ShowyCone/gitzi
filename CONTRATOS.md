@@ -12,8 +12,8 @@ Estado: contrato compartido para Entregas 1 y 2. `Cargo.toml`, `Cargo.lock`, `sr
 ## Dominio: `src/domain.rs` (propiedad del orquestador)
 
 - `RepositoryStatus { branch: String, upstream: Option<String>, ahead: u32, behind: u32, files: Vec<FileStatus> }`.
-- `FileStatus { path: PathBuf, index_status: char, worktree_status: char }`. El estado original de dos caracteres porcelain se conserva.
-- `CommandStatus::{Succeeded, Failed}`.
+- `FileStatus { path: PathBuf, index_status: char, worktree_status: char, unmerged: bool }`. El estado original de dos caracteres porcelain se conserva; `unmerged` indica además el tipo de registro `u`, incluidos estados como `AA`/`DD` que no llevan `U`. `path` es relativa al root del repositorio y se preserva literalmente: no normalizar ni canonicalizar; todos los procesos de archivo usan `cwd` igual al root.
+- `CommandStatus::{Succeeded, SucceededWithDifferences, Failed}`. La segunda variante significa que el proceso terminó correctamente y encontró diferencias; conserva el código de salida real, especialmente `1` en `diff --no-index`.
 - `CommandEntry { id: u64, command_display: String, cwd: Option<PathBuf>, started_at: SystemTime, duration: Duration, status: CommandStatus, exit_code: Option<i32>, stdout: String, stderr: String }`.
 - `AppSnapshot { git_checked: bool, git_version: Option<String>, active_repo: Option<PathBuf>, repository: Option<RepositoryStatus>, busy: bool, error_message: Option<String>, recent_repositories: Vec<PathBuf>, command_log: Vec<CommandEntry> }`.
 - `UiAction::{OpenRepository(PathBuf), Refresh}`.
@@ -54,20 +54,21 @@ Se fija eframe `0.36.2` tras verificar la documentación oficial. Se desactivan 
 ### Dominio compartido (`src/domain.rs`, propiedad T2-APP)
 
 - `RepositoryStatus.has_head: Option<bool>` identifica si el repositorio ya tiene un commit; `None` significa que la respuesta no incluyó ese dato.
+- El parser de porcelain v2 interpreta `# branch.oid (initial)` y un oid compuesto de ceros como `has_head=false`, un oid real como `true`, y el campo ausente como `None`. La forma observada con el Git de Windows de este host fue `(initial)`.
 - `DiffArea::{Unstaged, Staged}` selecciona árbol de trabajo contra índice o índice contra HEAD.
-- `FileDiff { path, area, text, binary, truncated }` representa una diferencia de un archivo. La UI muestra estado explícito para binarios y salida truncada.
+- `FileDiff { repository, path, area, text, binary, truncated }` representa una diferencia de un archivo. Su identidad es repositorio + ruta relativa literal + área. La UI muestra el diff solo mientras esa identidad coincida con la selección actual; cambios de selección/repositorio y mutaciones invalidan la vista. Muestra estado explícito para binarios y salida truncada.
 - `AppSnapshot.file_diff: Option<FileDiff>` contiene el diff vigente. Una respuesta obsoleta no reemplaza el diff actual.
 - `UiAction` añadirá `InitializeRepository(PathBuf)`, `CloneRepository { source: String, destination: PathBuf }`, `LoadDiff { path: PathBuf, area: DiffArea }`, `StageFile(PathBuf)`, `UnstageFile(PathBuf)` y `Commit(String)`.
 
 ### Motor Git (`src/git/**`, propiedad T2-GIT)
 
-- `GitOperation` añadirá `InitializeRepository { path }`, `CloneRepository { source, destination }`, `ReadDiff { path, area, untracked }`, `StageFile { path }`, `UnstageFile { path, has_head }` y `Commit { message }`.
+- `GitOperation` añadirá `InitializeRepository { path }`, `CloneRepository { source, destination }`, `ReadDiff { repository, path, area, untracked }`, `StageFile { repository, path }`, `UnstageFile { repository, path, has_head }` y `Commit { repository, message }`. Cada operación de archivo recibe el repositorio explícito para establecer `cwd` sin depender de estado global.
 - `GitResult` añadirá `RepositoryInitialized { path }`, `RepositoryCloned { path }`, `DiffLoaded { diff }`, `FileStaged { path }`, `FileUnstaged { path }` y `CommitCreated { path }`.
 - Inicializará con `git init -- <path>` y clonará con `git clone -- <source> <destination>`. El destino no se borra ni se sobrescribe; Git determina si puede clonar ahí.
-- Diff sin preparar: `git --no-optional-locks diff --no-ext-diff --no-textconv --no-color -- <path>`. Diff preparado: misma consulta con `--cached`. Para un archivo untracked, genera el diff contra `/dev/null` con `git diff --no-index`; el código 1 que indica diferencias se considera resultado esperado y se conserva en el registro.
+- Diff sin preparar: `git --no-optional-locks --literal-pathspecs diff --no-ext-diff --no-textconv --no-color -- <path>`. Diff preparado: misma consulta con `--cached`. Para un archivo untracked, genera el diff contra `/dev/null` con `git diff --no-index`; el código 1 que indica diferencias se registra como `SucceededWithDifferences`, no como error, conservando el código real. `/dev/null` es el operando nulo de Git también en Git para Windows.
 - Cada flujo de diff se limita a 1 MiB. `binary` y `truncated` comunican el estado real; nunca se presenta salida incompleta como diff completo.
-- Preparar afecta solo el archivo seleccionado, usando `--literal-pathspecs` y `--`. Despreparar conserva el contenido del árbol de trabajo: con `has_head=true` usa `restore --staged`; en una rama sin commits (`has_head=false`) usa `rm --cached` para mantener el archivo en disco. Si `has_head` no se conoce, la app no ofrece esa acción.
-- Commit usa solo el índice y recibe el mensaje por stdin (`git commit --file=-`), sin incluirlo en los argumentos ni preparar cambios adicionales. No desactiva hooks ni la firma configurada.
+- Preparar afecta solo el archivo seleccionado, usando `git --literal-pathspecs add -- <path>`. Despreparar conserva el contenido del árbol de trabajo: con `has_head=true` usa `git --literal-pathspecs restore --staged -- <path>`; en una rama sin commits (`has_head=false`) usa `git --literal-pathspecs rm --cached -- <path>` para mantener el archivo en disco. Si `has_head` no se conoce, la app no ofrece esa acción. `--` separa opciones y ruta; `--literal-pathspecs` evita que Git interprete metacaracteres del nombre como patrones.
+- Commit usa solo el índice y recibe el mensaje por stdin (`git commit --file=-`), sin incluirlo en argumentos ni en el comando copiable, y sin preparar cambios adicionales. El registro refleja argv/cwd y la salida real; la salida capturada puede contener texto emitido por Git o por un hook. El mensaje no forma parte de la invocación registrada. No desactiva hooks ni la firma configurada.
 - Las operaciones se serializan en el worker existente. Tras init/clone y cada mutación, la app consulta de nuevo el estado. Rutas como argumentos separados y literales.
 - Las pruebas mutantes y de flujo usan repositorios temporales. Cubren repo sin commits, binarios, nombres con espacios/Unicode, diffs staged y unstaged separados, stage/unstage y commit que conserva cambios no preparados.
 

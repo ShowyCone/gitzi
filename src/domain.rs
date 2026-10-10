@@ -9,6 +9,7 @@ pub struct RepositoryStatus {
     pub upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
+    pub has_head: Option<bool>,
     pub files: Vec<FileStatus>,
 }
 
@@ -17,11 +18,29 @@ pub struct FileStatus {
     pub path: PathBuf,
     pub index_status: char,
     pub worktree_status: char,
+    pub unmerged: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffArea {
+    Unstaged,
+    Staged,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileDiff {
+    pub repository: PathBuf,
+    pub path: PathBuf,
+    pub area: DiffArea,
+    pub text: String,
+    pub binary: bool,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandStatus {
     Succeeded,
+    SucceededWithDifferences,
     Failed,
 }
 
@@ -48,10 +67,23 @@ pub struct AppSnapshot {
     pub error_message: Option<String>,
     pub recent_repositories: Vec<PathBuf>,
     pub command_log: Vec<CommandEntry>,
+    pub file_diff: Option<FileDiff>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiAction {
     OpenRepository(PathBuf),
     Refresh,
+    InitializeRepository(PathBuf),
+    CloneRepository {
+        source: String,
+        destination: PathBuf,
+    },
+    LoadDiff {
+        path: PathBuf,
+        area: DiffArea,
+    },
+    StageFile(PathBuf),
+    UnstageFile(PathBuf),
+    Commit(String),
 }
