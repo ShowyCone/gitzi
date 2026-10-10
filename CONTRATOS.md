@@ -1,5 +1,34 @@
 # Contratos compartidos
 
+## Actualización T7: ventana compacta y publicación en GitHub
+
+### Dominio y aplicación (`src/domain.rs`, `src/app.rs`, `src/main.rs`)
+
+- `GitHubRepositoryVisibility::{Private, Public}` usa `Private` por defecto. `is_valid_github_repository_name` admite únicamente un slug ASCII de 1–100 caracteres alfanuméricos, `-`, `_` o `.`, excepto `.` y `..`; no admite owner, URL ni argumentos.
+- `UiAction::StartGitHubBrowserLogin` inicia el flujo oficial web interactivo de GitHub CLI; `CheckGitHubAuth` solo consulta cuando se solicita.
+- `UiAction::CreateGitHubRepository { name, visibility }` requiere confirmación de la UI. La aplicación valida que gh esté autenticado, exista repositorio abierto con commit y rama local, el slug sea válido y no exista `origin`.
+- El runner recibe `GitOperation::CreateGitHubRepository { repository, name, visibility }` y, al tener éxito, devuelve `GitResult::GitHubRepositoryCreated { repository, remote_url }`. La aplicación presenta `success_message` y vuelve a inspeccionar estado, ramas y remotos.
+- La acción se vuelve a validar tras la confirmación y el runner hace su propio preflight. Si la publicación terminó pero falla una consulta de refresco, la UI informa en un mensaje compuesto que el remoto se creó y que solo falló la actualización local.
+- El efecto crea un repo en la cuenta gh activa, incorpora `origin` y publica los commits de la rama local actual. Los cambios sin commit no se suben. La visibilidad pública se identifica explícitamente; la opción privada es predeterminada. No se reemplaza ni reescribe un remoto existente. Un fallo de push puede dejar creado el repo remoto y debe indicarlo; no se intenta rollback automático.
+- La ventana se inicia fija en 1024×700, sin redimensionamiento, maximización ni fullscreen. La UI debe seguir siendo funcional con scroll y distribución compacta.
+
+### Runner (`src/git/runner.rs`, propiedad T7-GIT)
+
+- El login visible usa `gh auth login --hostname github.com --web`, con argumentos separados y la consola necesaria para prompts restantes. La CLI abre el navegador; no se implementa OAuth propio ni se consulta/copiar tokens.
+- Antes del efecto remoto revalida slug, autenticación `gh auth status --active --hostname github.com`, HEAD/rama local y ausencia de `origin`.
+- Crea con `gh repo create <slug> --source . --remote origin --push --private|--public`, `cwd` igual al root y sin shell. Al éxito lee `git remote get-url origin` y devuelve la URL real.
+- No hace commit automático, no sube cambios sin commit, no sobrescribe `origin`, no fuerza operaciones ni elimina recursos remotos. Los fallos posteriores a `gh repo create` explican que puede existir un repo remoto aunque no se haya completado el push/lectura del remote.
+- Registra invocaciones reales y mantiene los límites y redacción existentes. Pruebas con repositorios temporales y argumentos falsos; no login/creación real ni red.
+
+### Interfaz (`src/ui/**`, propiedad T7-UI)
+
+- Presenta login explícitamente como iniciado mediante navegador, indicando el papel de la consola de GitHub CLI y ofreciendo verificación posterior.
+- La publicación incluye nombre, privado/público (privado predeterminado), disponibilidad según autenticación/HEAD/slug/`origin` y confirmación con nombre, visibilidad, cuenta activa/remote `origin`, commits a publicar y aviso de que lo no confirmado seguirá local.
+- Refina la jerarquía visual con estilo moderno ligero en 1024×700, sin retirar flujos D1–D6. El registro de comandos debe seguir plegable, permitir copiar y exponer salida/error por entrada en secciones plegables y acotadas.
+- Presenta `success_message` y `error_message` como estados distintos, legibles y accesibles además del color.
+
+Estado de la entrega: T7 integrada y revisada. `src/domain.rs`, `src/app.rs`, `src/main.rs` y los documentos raíz pertenecen al orquestador; runner y UI mantuvieron propietarios separados.
+
 ## Actualización T6: acceso a GitHub y presentación
 
 ### Dominio y aplicación (`src/domain.rs`, `src/app.rs`)

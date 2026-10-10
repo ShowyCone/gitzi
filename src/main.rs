@@ -8,8 +8,11 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1320.0, 860.0])
-            .with_min_inner_size([960.0, 640.0]),
+            .with_inner_size([1024.0, 700.0])
+            .with_resizable(false)
+            .with_maximize_button(false)
+            .with_maximized(false)
+            .with_fullscreen(false),
         ..Default::default()
     };
 

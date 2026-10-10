@@ -7,15 +7,26 @@ use eframe::egui;
 
 use crate::domain::{
     AppSnapshot, BranchInfo, BranchKind, CommandEntry, CommandStatus, DiffArea, FileStatus,
-    GitHubAuthStatus, IntegrationKind, PullPolicy, UiAction,
+    GitHubAuthStatus, GitHubRepositoryVisibility, IntegrationKind, PullPolicy, UiAction,
 };
 
 #[derive(Clone, Debug)]
 enum Confirmation {
-    DropStash { oid: String, label: String },
+    DropStash {
+        oid: String,
+        label: String,
+    },
     DiscardFile(PathBuf),
     DeleteBranch(String),
-    AbortIntegration { kind: String },
+    AbortIntegration {
+        kind: String,
+    },
+    CreateGitHubRepository {
+        name: String,
+        visibility: GitHubRepositoryVisibility,
+        repository: PathBuf,
+        branch: String,
+    },
 }
 
 pub struct UiState {
@@ -43,6 +54,8 @@ pub struct UiState {
     stash_include_untracked: bool,
     selected_stash: Option<String>,
     confirmation: Option<Confirmation>,
+    github_repository_name: String,
+    github_repository_visibility: GitHubRepositoryVisibility,
 }
 
 impl Default for UiState {
@@ -72,6 +85,8 @@ impl Default for UiState {
             stash_include_untracked: false,
             selected_stash: None,
             confirmation: None,
+            github_repository_name: String::new(),
+            github_repository_visibility: GitHubRepositoryVisibility::default(),
         }
     }
 }
@@ -103,11 +118,11 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
         .show(ui, |ui| {
             egui::Frame::new()
                 .fill(ui.visuals().faint_bg_color)
-                .inner_margin(egui::Margin::symmetric(18, 14))
+                .inner_margin(egui::Margin::symmetric(14, 10))
                 .corner_radius(egui::CornerRadius::same(8))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.heading(egui::RichText::new("Gitzi").strong().size(24.0));
+                        ui.heading(egui::RichText::new("Gitzi").strong().size(22.0));
                         ui.add_space(10.0);
                         if snapshot.busy {
                             ui.spinner();
@@ -215,9 +230,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                 });
             }
 
-            ui.add_space(14.0);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
-                ui.heading("Repositorio");
+                ui.heading(egui::RichText::new("Repositorio").size(18.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let refresh = ui.add_enabled(
                         can_act && snapshot.active_repo.is_some(),
@@ -232,6 +247,10 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
             if let Some(message) = &snapshot.error_message {
                 egui::Frame::new()
                     .fill(ui.visuals().error_fg_color.gamma_multiply(0.10))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        ui.visuals().error_fg_color.gamma_multiply(0.32),
+                    ))
                     .inner_margin(egui::Margin::symmetric(12, 9))
                     .corner_radius(egui::CornerRadius::same(6))
                     .show(ui, |ui| {
@@ -245,6 +264,30 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                         });
                     });
                 ui.add_space(8.0);
+            }
+            if let Some(message) = &snapshot.success_message {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(43, 89, 70).gamma_multiply(0.50))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(111, 214, 174).gamma_multiply(0.45),
+                    ))
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new("Completado")
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(145, 230, 190)),
+                            );
+                            ui.label(
+                                egui::RichText::new(message)
+                                    .color(egui::Color32::from_rgb(145, 230, 190)),
+                            );
+                        });
+                    });
+                ui.add_space(6.0);
             }
 
             match (&snapshot.active_repo, &snapshot.repository) {
@@ -303,6 +346,8 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                     });
                     ui.add_space(8.0);
                     render_collaboration(ui, state, snapshot, can_act, &mut action);
+                    ui.add_space(6.0);
+                    render_github_repository(ui, state, snapshot, can_act, &mut action);
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Archivos").strong());
@@ -374,11 +419,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut UiState, snapshot: &AppSnapshot) ->
                             "Abre un repositorio",
                             "Escribe una ruta o elige un repositorio reciente.",
                         );
+                        render_github_repository(ui, state, snapshot, false, &mut action);
                     }
                 }
             }
 
-            render_confirmation(ui, state, can_act, &mut action);
+            render_confirmation(ui, state, snapshot, can_act, &mut action);
 
             ui.add_space(12.0);
             let log_response = egui::CollapsingHeader::new(
@@ -449,14 +495,21 @@ fn render_github_login(
                     ui.visuals().weak_text_color(),
                 ),
             };
-            ui.label(egui::RichText::new(status).color(color));
+            egui::Frame::new()
+                .fill(color.gamma_multiply(0.12))
+                .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.30)))
+                .inner_margin(egui::Margin::symmetric(7, 2))
+                .corner_radius(egui::CornerRadius::same(5))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(status).color(color).strong());
+                });
 
             let start = ui.add_enabled(
                 can_act && action.is_none(),
-                egui::Button::new("Iniciar sesión con GitHub"),
+                egui::Button::new("Iniciar sesión en navegador"),
             );
             if start.clicked() {
-                *action = Some(UiAction::StartGitHubLogin);
+                *action = Some(UiAction::StartGitHubBrowserLogin);
             }
             let verify = ui.add_enabled(
                 can_act && action.is_none(),
@@ -468,11 +521,114 @@ fn render_github_login(
         });
         ui.label(
             egui::RichText::new(
-                "El inicio se completa en la consola. Al volver, verifica la sesión aquí. GitHub CLI es opcional para las funciones Git.",
+                "gh abre el navegador y usa una consola para completar cualquier paso restante. Al volver, verifica la sesión aquí. GitHub CLI es opcional para Git.",
             )
             .weak(),
         );
     });
+}
+
+fn render_github_repository(
+    ui: &mut egui::Ui,
+    state: &mut UiState,
+    snapshot: &AppSnapshot,
+    can_act: bool,
+    action: &mut Option<UiAction>,
+) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.heading(egui::RichText::new("Crear repositorio desde commits").size(16.0));
+        if snapshot.active_repo.is_none() {
+            ui.label("Abre un repositorio para publicar sus commits en GitHub.");
+            return;
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Nombre");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.github_repository_name)
+                    .hint_text("nombre-del-repositorio")
+                    .desired_width(250.0),
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Visibilidad");
+            ui.selectable_value(
+                &mut state.github_repository_visibility,
+                GitHubRepositoryVisibility::Private,
+                "Privado",
+            );
+            ui.selectable_value(
+                &mut state.github_repository_visibility,
+                GitHubRepositoryVisibility::Public,
+                "Público",
+            );
+        });
+        if state.github_repository_visibility == GitHubRepositoryVisibility::Public {
+            ui.label(
+                egui::RichText::new("El repositorio y los commits serán públicos.")
+                    .color(ui.visuals().warn_fg_color),
+            );
+        }
+
+        let reason = github_repository_disabled_reason(snapshot, &state.github_repository_name);
+        if let Some(reason) = reason {
+            ui.label(egui::RichText::new(reason).weak());
+        }
+        let create = ui.add_enabled(
+            can_act && action.is_none() && reason.is_none(),
+            egui::Button::new("Continuar…"),
+        );
+        if create.clicked()
+            && let (Some(repository), Some(status)) =
+                (snapshot.active_repo.clone(), snapshot.repository.as_ref())
+        {
+            state.confirmation = Some(Confirmation::CreateGitHubRepository {
+                name: state.github_repository_name.trim().to_owned(),
+                visibility: state.github_repository_visibility,
+                repository,
+                branch: status.branch.clone(),
+            });
+        }
+    });
+}
+
+fn github_repository_disabled_reason(snapshot: &AppSnapshot, name: &str) -> Option<&'static str> {
+    if snapshot.github_auth_status != GitHubAuthStatus::Authenticated {
+        return Some("Inicia sesión en GitHub y verifica la sesión para continuar.");
+    }
+    if snapshot.active_repo.is_none() {
+        return Some("Abre un repositorio local.");
+    }
+    let Some(repository) = snapshot.repository.as_ref() else {
+        return Some("Espera a que Gitzi termine de consultar el repositorio.");
+    };
+    if repository.has_head != Some(true) {
+        return Some("Crea al menos un commit antes de publicar.");
+    }
+    if repository.branch.trim().is_empty() {
+        return Some("HEAD está separado; cambia a una rama local para publicar.");
+    }
+    let current_local_branch = snapshot.branches.iter().any(|branch| {
+        branch.kind == BranchKind::Local && branch.current && branch.name == repository.branch
+    });
+    if !current_local_branch {
+        return Some(if snapshot.busy {
+            "Cargando ramas locales; espera antes de continuar."
+        } else {
+            "No se confirmó una rama local actual; revisa si HEAD está separado."
+        });
+    }
+    if snapshot
+        .remotes
+        .iter()
+        .any(|remote| remote.name == "origin")
+    {
+        return Some("El repositorio ya tiene un remoto llamado origin.");
+    }
+    if !crate::domain::is_valid_github_repository_name(name.trim()) {
+        return Some("Escribe un nombre válido para el repositorio.");
+    }
+    None
 }
 
 fn apply_theme(ui: &mut egui::Ui) {
@@ -507,9 +663,9 @@ fn apply_theme(ui: &mut egui::Ui) {
 
     let style = ui.style_mut();
     style.visuals = visuals;
-    style.spacing.item_spacing = egui::vec2(9.0, 7.0);
-    style.spacing.button_padding = egui::vec2(11.0, 6.0);
-    style.spacing.interact_size = egui::vec2(30.0, 30.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.button_padding = egui::vec2(9.0, 4.0);
+    style.spacing.interact_size = egui::vec2(28.0, 28.0);
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
     style
         .text_styles
@@ -1024,6 +1180,7 @@ fn render_recovery(
 fn render_confirmation(
     ui: &mut egui::Ui,
     state: &mut UiState,
+    snapshot: &AppSnapshot,
     can_act: bool,
     action: &mut Option<UiAction>,
 ) {
@@ -1036,6 +1193,7 @@ fn render_confirmation(
         .resizable(false)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
+            let mut confirmation_valid = can_act;
             match &confirmation {
                 Confirmation::DropStash { label, .. } => {
                     ui.label(format!("Se eliminará este stash de forma permanente: {label}"));
@@ -1055,15 +1213,72 @@ fn render_confirmation(
                     ui.label(format!("Se abortará la operación de {kind} en curso."));
                     ui.label("Se descartará la integración y los cambios preparados y sin preparar realizados al resolver conflictos.");
                 }
+                Confirmation::CreateGitHubRepository {
+                    name,
+                    visibility,
+                    repository,
+                    branch,
+                } => {
+                    let visibility_label = match visibility {
+                        GitHubRepositoryVisibility::Private => "privado",
+                        GitHubRepositoryVisibility::Public => "público",
+                    };
+                    ui.label(format!(
+                        "Se creará un repositorio {visibility_label} llamado {name} en la cuenta activa de GitHub."
+                    ));
+                    ui.label(format!(
+                        "Se añadirá origin y se publicarán los commits de la rama actual ({branch})."
+                    ));
+                    ui.label("Los cambios que aún no tienen commit permanecerán solo en este equipo.");
+                    if *visibility == GitHubRepositoryVisibility::Public {
+                        ui.label(
+                            egui::RichText::new("El repositorio será visible públicamente.")
+                                .color(ui.visuals().warn_fg_color)
+                                .strong(),
+                        );
+                    }
+
+                    let current_branch = snapshot.repository.as_ref().map(|status| &status.branch);
+                    if snapshot.active_repo.as_ref() != Some(repository)
+                        || current_branch.is_none_or(|current| current != branch)
+                    {
+                        confirmation_valid = false;
+                        ui.label(
+                            egui::RichText::new(
+                                "El repositorio o la rama cambió. Cierra esta confirmación y revisa los datos.",
+                            )
+                            .color(ui.visuals().error_fg_color),
+                        );
+                    } else if let Some(reason) = github_repository_disabled_reason(snapshot, name) {
+                        confirmation_valid = false;
+                        ui.label(
+                            egui::RichText::new(reason).color(ui.visuals().error_fg_color),
+                        );
+                    }
+                }
             }
             ui.horizontal(|ui| {
-                let confirm = ui.add_enabled(can_act, egui::Button::new("Confirmar operación"));
+                let label = if matches!(&confirmation, Confirmation::CreateGitHubRepository { .. }) {
+                    "Crear y publicar"
+                } else {
+                    "Confirmar operación"
+                };
+                let confirm = ui.add_enabled(
+                    confirmation_valid && action.is_none(),
+                    egui::Button::new(label),
+                );
                 if confirm.clicked() {
                     *action = Some(match confirmation {
                         Confirmation::DropStash { oid, .. } => UiAction::DropStash(oid),
                         Confirmation::DiscardFile(path) => UiAction::DiscardFile(path),
                         Confirmation::DeleteBranch(name) => UiAction::DeleteBranch(name),
                         Confirmation::AbortIntegration { .. } => UiAction::AbortIntegration,
+                        Confirmation::CreateGitHubRepository {
+                            name, visibility, ..
+                        } => UiAction::CreateGitHubRepository {
+                            name,
+                            visibility,
+                        },
                     });
                     state.confirmation = None;
                 }
@@ -1320,7 +1535,7 @@ fn empty_state(ui: &mut egui::Ui, title: &str, detail: &str) {
 
 fn command_entry(ui: &mut egui::Ui, state: &mut UiState, entry: &CommandEntry) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(
                 egui::RichText::new(match entry.status {
                     CommandStatus::Succeeded => "Correcto",
@@ -1343,42 +1558,56 @@ fn command_entry(ui: &mut egui::Ui, state: &mut UiState, entry: &CommandEntry) {
                 format_start_time(entry.started_at),
                 entry.duration.as_millis()
             ));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let copied = state.copied_command == Some(entry.id);
-                if ui
-                    .button(if copied { "Copiado" } else { "Copiar" })
-                    .clicked()
-                {
-                    ui.ctx().copy_text(entry.command_display.clone());
-                    state.copied_command = Some(entry.id);
-                }
-            });
+            let copied = state.copied_command == Some(entry.id);
+            if ui
+                .button(if copied { "Copiado" } else { "Copiar comando" })
+                .clicked()
+            {
+                ui.ctx().copy_text(entry.command_display.clone());
+                state.copied_command = Some(entry.id);
+            }
         });
-        ui.monospace(egui::RichText::new(&entry.command_display).size(12.0));
-        ui.label(format!(
-            "cwd: {}",
-            entry
-                .cwd
-                .as_ref()
-                .map_or_else(|| "—".to_owned(), |path| path.display().to_string())
-        ));
+        egui::ScrollArea::horizontal()
+            .id_salt(("command_text", entry.id))
+            .max_height(28.0)
+            .show(ui, |ui| {
+                ui.monospace(egui::RichText::new(&entry.command_display).size(12.0));
+            });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Directorio").weak());
+            ui.monospace(
+                entry
+                    .cwd
+                    .as_ref()
+                    .map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
+            );
+        });
         if !entry.stdout.is_empty() {
             ui.collapsing("Salida", |ui| {
-                egui::ScrollArea::both()
+                egui::ScrollArea::vertical()
                     .id_salt(("command_stdout", entry.id))
-                    .max_height(140.0)
-                    .show(ui, |ui| ui.monospace(&entry.stdout));
+                    .max_height(96.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::horizontal()
+                            .id_salt(("command_stdout_horizontal", entry.id))
+                            .show(ui, |ui| ui.monospace(&entry.stdout));
+                    });
             });
         }
         if !entry.stderr.is_empty() {
             ui.collapsing("Error", |ui| {
-                egui::ScrollArea::both()
+                egui::ScrollArea::vertical()
                     .id_salt(("command_stderr", entry.id))
-                    .max_height(140.0)
+                    .max_height(96.0)
                     .show(ui, |ui| {
-                        ui.monospace(
-                            egui::RichText::new(&entry.stderr).color(ui.visuals().error_fg_color),
-                        )
+                        egui::ScrollArea::horizontal()
+                            .id_salt(("command_stderr_horizontal", entry.id))
+                            .show(ui, |ui| {
+                                ui.monospace(
+                                    egui::RichText::new(&entry.stderr)
+                                        .color(ui.visuals().error_fg_color),
+                                )
+                            });
                     });
             });
         }

@@ -136,6 +136,24 @@ pub enum GitHubAuthStatus {
     LoginStarted,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GitHubRepositoryVisibility {
+    #[default]
+    Private,
+    Public,
+}
+
+/// Restrict repository names to one GitHub repository slug, never an owner/name path or URL.
+pub fn is_valid_github_repository_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 #[derive(Clone, Debug)]
 pub struct CommandEntry {
     pub id: u64,
@@ -158,6 +176,7 @@ pub struct AppSnapshot {
     pub repository: Option<RepositoryStatus>,
     pub busy: bool,
     pub error_message: Option<String>,
+    pub success_message: Option<String>,
     pub recent_repositories: Vec<PathBuf>,
     pub command_log: Vec<CommandEntry>,
     pub file_diff: Option<FileDiff>,
@@ -175,8 +194,12 @@ pub struct AppSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiAction {
-    StartGitHubLogin,
+    StartGitHubBrowserLogin,
     CheckGitHubAuth,
+    CreateGitHubRepository {
+        name: String,
+        visibility: GitHubRepositoryVisibility,
+    },
     OpenRepository(PathBuf),
     Refresh,
     InitializeRepository(PathBuf),
@@ -224,4 +247,30 @@ pub enum UiAction {
     AbortIntegration,
     DiscardFile(PathBuf),
     DeleteBranch(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_github_repository_name;
+
+    #[test]
+    fn github_repository_name_accepts_only_a_single_safe_slug() {
+        assert!(is_valid_github_repository_name("gitzi-app_2.v1"));
+        assert!(is_valid_github_repository_name(&"a".repeat(100)));
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "https://github.com/a",
+            "two words",
+            "ñ",
+        ] {
+            assert!(
+                !is_valid_github_repository_name(invalid),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(!is_valid_github_repository_name(&"a".repeat(101)));
+    }
 }

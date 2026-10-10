@@ -1,6 +1,6 @@
 # Gitzi
 
-Gitzi es un cliente de escritorio visual para trabajar con repositorios Git. Permite abrir, inicializar y clonar repositorios; revisar diffs por archivo; preparar o retirar archivos del índice; crear commits solo con los cambios preparados; y colaborar con remotos mediante Fetch, Pull y Push. También permite crear/cambiar ramas, configurar upstream, recorrer el historial paginado, consultar detalles de commits y comparar referencias. La recuperación cubre stash, merge, rebase, revert, resolución de conflictos, descarte confirmado y eliminación segura de ramas. El registro muestra las invocaciones reales de Git. Las operaciones se ejecutan en segundo plano.
+Gitzi es un cliente de escritorio visual para trabajar con repositorios Git. Permite abrir, inicializar y clonar repositorios; revisar diffs por archivo; preparar o retirar archivos del índice; crear commits solo con los cambios preparados; y colaborar con remotos mediante Fetch, Pull y Push. También permite crear/cambiar ramas, configurar upstream, recorrer el historial paginado, consultar detalles de commits y comparar referencias. La recuperación cubre stash, merge, rebase, revert, resolución de conflictos, descarte confirmado y eliminación segura de ramas. Con GitHub CLI puede iniciar sesión desde el navegador y crear un repositorio remoto privado o público desde los commits de la rama actual. El registro muestra las invocaciones reales de Git y GitHub CLI. Las operaciones se ejecutan en segundo plano.
 
 ## Requisitos
 
@@ -8,7 +8,7 @@ Gitzi es un cliente de escritorio visual para trabajar con repositorios Git. Per
 - Para compilar desde el código: Rust 1.99.0 con Cargo. El `Cargo.lock` fija las dependencias.
 - En Linux, el sistema debe proporcionar las bibliotecas de ejecución de su sesión gráfica (X11 o Wayland) y OpenGL. La CI instala las bibliotecas de desarrollo para compilar, pero estas no se incluyen en el paquete.
 - Para crear commits, configura nombre y correo de autor/committer en Git.
-- GitHub CLI (`gh`) es opcional; se requiere únicamente para usar el botón de inicio de sesión de GitHub. Las funciones de Git siguen usando los credential helpers o el agente SSH configurados en el sistema.
+- GitHub CLI (`gh`) es opcional; se requiere para iniciar sesión desde Gitzi o crear un repositorio GitHub. Las funciones Git estándar siguen usando los credential helpers o el agente SSH configurados en el sistema.
 
 ## Ejecutar
 
@@ -20,11 +20,13 @@ cargo run
 
 En Gitzi, escribe la ruta de un repositorio local existente y pulsa **Abrir**, o usa **Inicializar** o **Clonar** para crear/obtener uno. Selecciona un archivo y su área (**Sin preparar** o **Preparado**) para cargar el diff. Los botones **Preparar** y **Deshacer preparación** solo afectan el archivo elegido. **Crear commit** usa exclusivamente el índice y conserva cambios sin preparar.
 
-La ventana inicia en 1320×860 y puede reducirse hasta 960×640. En la franja superior, **Iniciar sesión con GitHub** abre el flujo web interactivo de GitHub CLI en una consola. Completa allí la autenticación; al volver, pulsa **Verificar sesión**. Si usarás remotos HTTPS, elige HTTPS y acepta autenticar Git con GitHub en los prompts de `gh`; para SSH, elige SSH y utiliza una clave/agente configurado.
+La ventana inicia fija en 1024×700; no se puede redimensionar, maximizar ni poner en pantalla completa. En la franja superior, **Iniciar sesión en navegador** inicia el flujo web oficial de GitHub CLI: `gh` abre el navegador y una consola visible permite completar los prompts restantes. Al volver, pulsa **Verificar sesión**. Si usarás remotos HTTPS, elige HTTPS y acepta autenticar Git con GitHub en los prompts de `gh`; para SSH, elige SSH y utiliza una clave/agente configurado.
 
 En **Colaboración**, Fetch consulta los remotos configurados. Pull usa la política elegida en **Preferencias**: avance rápido únicamente, merge o rebase. Esa preferencia se guarda en la configuración local de Gitzi y no modifica la configuración global de Git. Push envía la rama actual a su upstream explícito, aunque `push.default` indique otra cosa, y nunca fuerza un rechazo. Para una rama sin upstream, publícala o asocia un upstream remoto existente. Las ramas, ahead/behind y fechas de fetch reflejan referencias locales conocidas y pueden estar desactualizadas hasta hacer Fetch.
 
-Gitzi respeta los hooks, la firma y el resto de la configuración existente de Git. Reutiliza los credential helpers y la configuración SSH de Git; si la autenticación falla o se cancela, muestra el error original. No guarda credenciales ni captura tokens durante el login. Para GitHub, clona una URL HTTPS o SSH o trabaja con un remoto GitHub ya configurado; la sesión se completa con GitHub CLI y Git usa la credencial configurada en sus prompts, el credential helper o el agente SSH del sistema. Si `gh` no está instalado, puedes seguir usando Gitzi con las credenciales de Git ya configuradas. La interfaz solo inicia y verifica la sesión; Gitzi implementa las operaciones Git estándar, no una API de GitHub para pull requests o issues. Consulta [instalación de GitHub CLI](https://github.com/cli/cli#installation) y [su guía de autenticación](https://cli.github.com/manual/gh_auth_login).
+Gitzi respeta los hooks, la firma y el resto de la configuración existente de Git. Reutiliza los credential helpers y la configuración SSH de Git; si la autenticación falla o se cancela, muestra el error original. No guarda credenciales ni captura tokens durante el login. Si `gh` no está instalado, puedes seguir usando las funciones Git con las credenciales ya configuradas, pero no las opciones GitHub de la UI. Consulta [instalación de GitHub CLI](https://github.com/cli/cli#installation) y [su guía de autenticación](https://cli.github.com/manual/gh_auth_login).
+
+En un repositorio local con al menos un commit y sin remoto `origin`, **Crear repositorio desde commits** permite elegir un nombre y visibilidad. Privado está seleccionado inicialmente. Tras confirmar, Gitzi crea el repositorio en la cuenta activa de `gh`, añade `origin` y publica los commits de la rama local actual. Los cambios sin commit permanecen locales. No se sobrescribe un `origin` existente ni se crean commits automáticamente. Si se elige Público, Gitzi lo advierte antes de publicar. Un error al publicar puede dejar creado el repositorio remoto; Gitzi no intenta borrarlo automáticamente. Esta opción usa `gh repo create`; Gitzi no implementa API propia, pull requests o issues.
 
 En **Integración y recuperación**, puedes crear, inspeccionar y aplicar stashes; eliminar un stash requiere confirmación. Merge, Rebase y Revert exigen un árbol limpio. Si aparece un conflicto, Gitzi conserva y muestra la operación, permite abrir el archivo en el editor externo configurado y marcarlo resuelto al prepararlo; después puedes continuar o abortar. Abort, descartar archivos y eliminar ramas muestran confirmaciones concretas. La eliminación de ramas no fuerza un borrado que Git rechaza.
 
@@ -41,6 +43,8 @@ cargo run
 
 Entrega 4 se verificó localmente en Windows con Rust 1.99.0 y Git real: formato, Clippy y 27 pruebas pasan. Los casos usan repositorios temporales y cubren stash/OID, merge y rebase con conflictos, continuación/aborto, revert, descarte de cambios preparados y sin preparar, renombres y rutas Unicode. La validación local de Entrega 5 se registra en `ESTADO_DEL_PROYECTO.md`.
 
+La actualización T7 se verificó en Windows con Rust 1.99.0: formato y Clippy sin warnings, 33 pruebas y build release pasan. La revisión de código fue independiente. El login real, la publicación contra una cuenta GitHub, la GUI visual y Linux siguen pendientes, como se detalla en `ESTADO_DEL_PROYECTO.md`.
+
 ## Empaquetado
 
 En Windows x86_64, instala Rust 1.99.0 o posterior y ejecuta desde la raíz:
@@ -53,7 +57,7 @@ El script compila en modo release con `Cargo.lock` y escribe `dist/gitzi-windows
 
 ## GitHub y autenticación
 
-Gitzi se conecta a GitHub mediante comandos Git estándar y el remoto configurado en el repositorio. Para habilitar la CI de este proyecto, crea un repositorio GitHub vacío y configura su URL como `origin` (usa la URL real de tu repositorio):
+Gitzi puede crear el remoto desde **Crear repositorio desde commits**, siempre que el directorio tenga commits, no tenga `origin` y la sesión de GitHub CLI esté verificada. Para habilitar la CI de este proyecto, puedes usar esa opción o crear un repositorio vacío y configurar su URL como `origin` (usa la URL real de tu repositorio):
 
 ```sh
 git remote add origin https://github.com/OWNER/REPOSITORY.git
@@ -62,4 +66,4 @@ git push -u origin main
 
 Si `origin` ya existe, actualiza su URL con `git remote set-url origin URL` en vez de agregarlo de nuevo. Sustituye `main` por la rama actual si tiene otro nombre. El primer push requiere que completes la autenticación HTTPS con tu credential helper, o uses una URL SSH y una clave/agente SSH configurado. Después del push, GitHub Actions ejecutará el workflow en push; los pull requests y el disparo manual también están configurados. Hasta conectar el remoto y observar una ejecución, la CI remota no está validada. El workflow solo solicita permiso de lectura de contenido, no requiere secretos y no publica releases.
 
-Gitzi no implementa una API de GitHub ni gestiona pull requests o issues. `gh` guarda la autenticación en la ubicación segura disponible en el sistema (con fallback documentado por GitHub CLI si no encuentra almacén seguro); Gitzi no accede al token. Los paquetes no contienen Git, GitHub CLI ni credenciales.
+`gh` guarda la autenticación en la ubicación segura disponible en el sistema (con fallback documentado por GitHub CLI si no encuentra almacén seguro); Gitzi no accede al token. Los paquetes no contienen Git, GitHub CLI ni credenciales. El flujo con una cuenta GitHub real requiere que el usuario complete el login desde su equipo; no se realiza durante las pruebas automatizadas.

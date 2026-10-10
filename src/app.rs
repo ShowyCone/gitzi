@@ -5,6 +5,7 @@ use eframe::egui;
 use crate::{
     domain::{
         AppSnapshot, BranchKind, CommandEntry, DiffArea, FileStatus, GitHubAuthStatus, UiAction,
+        is_valid_github_repository_name,
     },
     git::{GitOperation, GitRequest, GitResult, GitWorker},
     settings,
@@ -69,7 +70,8 @@ impl GitziApp {
             | GitOperation::AbortIntegration(repository)
             | GitOperation::DiscardFile { repository, .. }
             | GitOperation::DeleteBranch { repository, .. } => Some(repository.clone()),
-            GitOperation::PublishBranch { repository, .. } => Some(repository.clone()),
+            GitOperation::PublishBranch { repository, .. }
+            | GitOperation::CreateGitHubRepository { repository, .. } => Some(repository.clone()),
             _ => None,
         };
         let id = self.next_request_id;
@@ -114,10 +116,11 @@ impl GitziApp {
         if self.snapshot.busy || self.snapshot.git_version.is_none() {
             return;
         }
+        self.snapshot.success_message = None;
 
         match action {
-            UiAction::StartGitHubLogin => {
-                self.submit(GitOperation::StartGitHubLogin, 0);
+            UiAction::StartGitHubBrowserLogin => {
+                self.submit(GitOperation::StartGitHubBrowserLogin, 0);
             }
             UiAction::CheckGitHubAuth => {
                 self.submit(GitOperation::CheckGitHubAuth, 0);
@@ -288,6 +291,7 @@ impl GitziApp {
             action @ (UiAction::Fetch
             | UiAction::Pull
             | UiAction::Push
+            | UiAction::CreateGitHubRepository { .. }
             | UiAction::PublishBranch(_)
             | UiAction::SetUpstream { .. }
             | UiAction::CreateBranch(_)
@@ -362,6 +366,47 @@ impl GitziApp {
                     repository,
                     local_branch: status.branch.clone(),
                     upstream,
+                }
+            }
+            UiAction::CreateGitHubRepository { name, visibility } => {
+                let name = name.trim();
+                if self.snapshot.github_auth_status != GitHubAuthStatus::Authenticated {
+                    self.snapshot.error_message = Some(
+                        "Inicia sesión en GitHub y verifica la sesión antes de crear un repositorio."
+                            .into(),
+                    );
+                    return;
+                }
+                if !is_valid_github_repository_name(name) {
+                    self.snapshot.error_message = Some(
+                        "El nombre debe ser un slug de 1–100 caracteres: letras, números, punto, guion o guion bajo."
+                            .into(),
+                    );
+                    return;
+                }
+                if status.has_head != Some(true)
+                    || status.branch.is_empty()
+                    || !self.current_branch_is_local(status)
+                {
+                    self.snapshot.error_message = Some(
+                        "Crea al menos un commit y selecciona una rama local para publicar.".into(),
+                    );
+                    return;
+                }
+                if self
+                    .snapshot
+                    .remotes
+                    .iter()
+                    .any(|remote| remote.name == "origin")
+                {
+                    self.snapshot.error_message =
+                        Some("Ya existe un remoto origin; Gitzi no lo reemplazará.".into());
+                    return;
+                }
+                GitOperation::CreateGitHubRepository {
+                    repository,
+                    name: name.to_owned(),
+                    visibility,
                 }
             }
             UiAction::PublishBranch(remote) => {
@@ -770,6 +815,15 @@ impl GitziApp {
                 Ok(GitResult::GitHubAuthChecked { status }) => {
                     self.snapshot.github_auth_status = status;
                 }
+                Ok(GitResult::GitHubRepositoryCreated {
+                    repository,
+                    remote_url,
+                }) if self.snapshot.active_repo.as_ref() == Some(&repository) => {
+                    self.refresh_after_mutation(repository);
+                    self.snapshot.success_message = Some(format!(
+                        "Repositorio creado y commits publicados: {remote_url}"
+                    ));
+                }
                 Ok(GitResult::RepositoryInspected { path, status }) => {
                     if self.snapshot.active_repo.as_ref() != Some(&path) {
                         self.clear_collaboration_state();
@@ -897,7 +951,16 @@ impl GitziApp {
                 Ok(GitResult::ExternalFileOpened { .. }) => {}
                 Err(error) => {
                     self.snapshot.git_checked = true;
-                    self.snapshot.error_message = Some(error.message);
+                    self.snapshot.error_message =
+                        Some(self.snapshot.success_message.take().map_or(
+                            error.message.clone(),
+                            |success| {
+                                format!(
+                                    "{success}. No se pudo actualizar la vista del repositorio: {}",
+                                    error.message
+                                )
+                            },
+                        ));
                     if let Some(repository) = refresh_after_error {
                         self.refresh_after_error(repository);
                     }

@@ -1,7 +1,8 @@
 use crate::domain::{
     BranchInfo, BranchKind, CommandEntry, CommandStatus, CommitDetail, CommitFileChange,
-    CommitSummary, DiffArea, FileDiff, GitHubAuthStatus, IntegrationKind, PullPolicy,
-    RefComparison, RemoteInfo, RepositoryStatus, StashDetail, StashEntry,
+    CommitSummary, DiffArea, FileDiff, GitHubAuthStatus, GitHubRepositoryVisibility,
+    IntegrationKind, PullPolicy, RefComparison, RemoteInfo, RepositoryStatus, StashDetail,
+    StashEntry, is_valid_github_repository_name,
 };
 use std::{
     ffi::OsString,
@@ -19,8 +20,13 @@ static LOG_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitOperation {
     DetectGit,
-    StartGitHubLogin,
+    StartGitHubBrowserLogin,
     CheckGitHubAuth,
+    CreateGitHubRepository {
+        repository: PathBuf,
+        name: String,
+        visibility: GitHubRepositoryVisibility,
+    },
     InspectRepository(PathBuf),
     InitializeRepository {
         path: PathBuf,
@@ -152,6 +158,10 @@ pub enum GitResult {
         version: String,
     },
     GitHubLoginStarted,
+    GitHubRepositoryCreated {
+        repository: PathBuf,
+        remote_url: String,
+    },
     GitHubAuthChecked {
         status: GitHubAuthStatus,
     },
@@ -269,8 +279,13 @@ pub struct GitResponse {
 
 pub(crate) fn handle_request(request: GitRequest) -> GitResponse {
     let (result, commands) = match request.operation {
-        GitOperation::StartGitHubLogin => start_github_login(),
+        GitOperation::StartGitHubBrowserLogin => start_github_login(),
         GitOperation::CheckGitHubAuth => check_github_auth(),
+        GitOperation::CreateGitHubRepository {
+            repository,
+            name,
+            visibility,
+        } => create_github_repository(repository, name, visibility),
         GitOperation::DetectGit => {
             let (entry, output) = run_git_from_current_dir(&[OsString::from("--version")]);
             let result = match output {
@@ -2086,6 +2101,286 @@ fn check_github_auth() -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
     (result, vec![entry])
 }
 
+fn create_github_repository(
+    repository: PathBuf,
+    name: String,
+    visibility: GitHubRepositoryVisibility,
+) -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
+    let mut commands = Vec::new();
+    if !is_valid_github_repository_name(&name) {
+        return (
+            Err(GitError {
+                message: "El nombre debe ser un slug de GitHub de 1 a 100 caracteres ASCII (letras, números, -, _ o .); no se admiten `.` ni `..`.".into(),
+            }),
+            commands,
+        );
+    }
+
+    let (entry, version) = run_gh_at(Some(&repository), &[OsString::from("--version")]);
+    commands.push(entry);
+    match version {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            return (
+                Err(command_error(
+                    "No se pudo comprobar GitHub CLI; instala `gh` o verifica su instalación",
+                    commands.last().expect("version command recorded"),
+                    &output.stderr,
+                )),
+                commands,
+            );
+        }
+        Err(error) if is_program_not_found(&error) => {
+            return (
+                Err(GitError {
+                    message: "GitHub CLI (`gh`) no está instalado o no está en PATH. Instálalo para crear el repositorio remoto.".into(),
+                }),
+                commands,
+            );
+        }
+        Err(error) => {
+            return (
+                Err(GitError {
+                    message: format!("No se pudo iniciar GitHub CLI. {error}"),
+                }),
+                commands,
+            );
+        }
+    }
+
+    let (entry, auth_output) = run_gh_at(Some(&repository), &github_auth_status_args());
+    commands.push(entry);
+    match auth_output {
+        Ok(output) if output.stdout.truncated || output.stderr.truncated => {
+            return (
+                Err(GitError {
+                    message: "La salida de `gh auth status` superó el límite de captura; no se puede confirmar la sesión activa.".into(),
+                }),
+                commands,
+            );
+        }
+        Ok(output) if output.status.success() => {}
+        Ok(_) => {
+            return (
+                Err(GitError {
+                    message: "No hay una sesión activa de GitHub CLI para github.com. Inicia sesión y vuelve a intentarlo.".into(),
+                }),
+                commands,
+            );
+        }
+        Err(error) if is_program_not_found(&error) => {
+            return (
+                Err(GitError {
+                    message: "GitHub CLI (`gh`) no está instalado o no está en PATH.".into(),
+                }),
+                commands,
+            );
+        }
+        Err(error) => {
+            return (
+                Err(GitError {
+                    message: format!("No se pudo verificar la sesión de GitHub CLI. {error}"),
+                }),
+                commands,
+            );
+        }
+    }
+
+    let branch = match validate_local_github_source(&repository, &mut commands) {
+        Ok(branch) => branch,
+        Err(error) => return (Err(error), commands),
+    };
+
+    let args = github_repo_create_args(&name, visibility);
+    let (entry, create_output) = run_gh_at(Some(&repository), &args);
+    commands.push(entry);
+    match create_output {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let error = command_error(
+                &format!(
+                    "No se pudo completar la creación/publicación de `{name}` desde la rama `{branch}`. GitHub puede haber creado el repositorio aunque haya fallado el push; revisa GitHub y el estado de `origin` antes de reintentar"
+                ),
+                commands.last().expect("create command recorded"),
+                &output.stderr,
+            );
+            return (Err(error), commands);
+        }
+        Err(error) => {
+            return (
+                Err(GitError {
+                    message: format!(
+                        "No se pudo iniciar `gh repo create`. No se confirmó la creación remota; verifica el estado de GitHub antes de reintentar. {error}"
+                    ),
+                }),
+                commands,
+            );
+        }
+    }
+
+    let args = [
+        OsString::from("remote"),
+        OsString::from("get-url"),
+        OsString::from("origin"),
+    ];
+    let (entry, remote_output) = run_git(&repository, &args);
+    commands.push(entry);
+    match remote_output {
+        Ok(output) if output.status.success() && !output.stdout.truncated => {
+            let remote_url = redact_text(String::from_utf8_lossy(&output.stdout.bytes).trim());
+            if remote_url.is_empty() {
+                return (
+                    Err(GitError {
+                        message: "GitHub pudo crear y publicar el repositorio, pero Git devolvió una URL vacía para `origin`. Revisa `git remote get-url origin` antes de continuar.".into(),
+                    }),
+                    commands,
+                );
+            }
+            (
+                Ok(GitResult::GitHubRepositoryCreated {
+                    repository,
+                    remote_url,
+                }),
+                commands,
+            )
+        }
+        Ok(output) => {
+            let error = command_error(
+                "GitHub pudo crear y publicar el repositorio, pero no se pudo leer `origin`; revisa `git remote get-url origin` antes de continuar",
+                commands.last().expect("remote lookup recorded"),
+                &output.stderr,
+            );
+            (Err(error), commands)
+        }
+        Err(error) => (
+            Err(GitError {
+                message: format!(
+                    "GitHub pudo crear y publicar el repositorio, pero no se pudo leer `origin`. Revisa `git remote get-url origin` antes de continuar. {error}"
+                ),
+            }),
+            commands,
+        ),
+    }
+}
+
+/// Validate the exact local source immediately before invoking GitHub.
+/// `git remote` detects an existing origin without changing any configuration.
+fn validate_local_github_source(
+    repository: &Path,
+    commands: &mut Vec<CommandEntry>,
+) -> Result<String, GitError> {
+    let remote_args = [OsString::from("remote")];
+    let (entry, output) = run_git(repository, &remote_args);
+    commands.push(entry);
+    match output {
+        Ok(output) if output.stdout.truncated => {
+            return Err(GitError {
+                message: "La lista de remotos superó el límite de captura; no se puede confirmar que `origin` esté libre.".into(),
+            });
+        }
+        Ok(output) if output.status.success() => {
+            if String::from_utf8_lossy(&output.stdout.bytes)
+                .lines()
+                .any(|remote| remote.trim() == "origin")
+            {
+                return Err(GitError {
+                    message: "Ya existe `origin`; no se modificó ni reemplazó. Elige otra estrategia o revisa ese remoto manualmente.".into(),
+                });
+            }
+        }
+        Ok(output) => {
+            return Err(command_error(
+                "No se pudieron consultar los remotos del repositorio",
+                commands.last().expect("remote listing recorded"),
+                &output.stderr,
+            ));
+        }
+        Err(error) => {
+            return Err(GitError {
+                message: format!("No se pudieron consultar los remotos del repositorio. {error}"),
+            });
+        }
+    }
+
+    let head_args = [
+        OsString::from("rev-parse"),
+        OsString::from("--verify"),
+        OsString::from("--quiet"),
+        OsString::from("HEAD"),
+    ];
+    let (entry, output) = run_git(repository, &head_args);
+    commands.push(entry);
+    match output {
+        Ok(output) if output.stdout.truncated => {
+            return Err(GitError {
+                message: "La respuesta de Git para HEAD superó el límite de captura.".into(),
+            });
+        }
+        Ok(output) if output.status.success() && !output.stdout.bytes.is_empty() => {}
+        Ok(_) => {
+            return Err(GitError {
+                message: "El repositorio no tiene un commit en HEAD. Crea un commit antes de publicar; Gitzi no creará commits automáticamente.".into(),
+            });
+        }
+        Err(error) => {
+            return Err(GitError {
+                message: format!("No se pudo verificar HEAD del repositorio. {error}"),
+            });
+        }
+    }
+
+    let branch_args = [
+        OsString::from("symbolic-ref"),
+        OsString::from("--quiet"),
+        OsString::from("--short"),
+        OsString::from("HEAD"),
+    ];
+    let (entry, output) = run_git(repository, &branch_args);
+    commands.push(entry);
+    match output {
+        Ok(output) if output.stdout.truncated => Err(GitError {
+            message: "La respuesta de Git para la rama actual superó el límite de captura.".into(),
+        }),
+        Ok(output) if output.status.success() => {
+            let branch = String::from_utf8_lossy(&output.stdout.bytes).trim().to_owned();
+            if branch.is_empty() {
+                Err(GitError {
+                    message: "No hay una rama local actual; HEAD podría estar separado. Cambia a una rama antes de publicar.".into(),
+                })
+            } else {
+                Ok(branch)
+            }
+        }
+        Ok(_) => Err(GitError {
+            message: "No hay una rama local actual; HEAD podría estar separado. Cambia a una rama antes de publicar.".into(),
+        }),
+        Err(error) => Err(GitError {
+            message: format!("No se pudo verificar la rama actual. {error}"),
+        }),
+    }
+}
+
+fn github_repo_create_args(name: &str, visibility: GitHubRepositoryVisibility) -> Vec<OsString> {
+    let visibility_flag = match visibility {
+        GitHubRepositoryVisibility::Private => "--private",
+        GitHubRepositoryVisibility::Public => "--public",
+    };
+    [
+        "repo".to_owned(),
+        "create".to_owned(),
+        name.to_owned(),
+        "--source".to_owned(),
+        ".".to_owned(),
+        "--remote".to_owned(),
+        "origin".to_owned(),
+        "--push".to_owned(),
+        visibility_flag.to_owned(),
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
+}
+
 fn start_github_login() -> (Result<GitResult, GitError>, Vec<CommandEntry>) {
     // Fail early with a useful message when `gh` is missing, while logging the
     // actual version check. The interactive login itself is never captured.
@@ -2290,6 +2585,10 @@ fn synthetic_launch_failure(executable: &str, args: &[OsString], message: String
 }
 
 fn run_gh(args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
+    run_gh_at(None, args)
+}
+
+fn run_gh_at(cwd: Option<&Path>, args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
     let started_at = SystemTime::now();
     let timer = Instant::now();
     let display = command_display("gh", args);
@@ -2299,6 +2598,9 @@ fn run_gh(args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     let outcome = match command.spawn() {
         Ok(mut child) => {
             let stdout = child.stdout.take().expect("piped stdout");
@@ -2346,7 +2648,9 @@ fn run_gh(args: &[OsString]) -> (CommandEntry, Result<Captured, String>) {
     let entry = CommandEntry {
         id: LOG_ID.fetch_add(1, Ordering::Relaxed),
         command_display: redact_text(&display),
-        cwd: std::env::current_dir().ok(),
+        cwd: cwd
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok()),
         started_at,
         duration,
         status,
@@ -2700,6 +3004,142 @@ mod tests {
         assert_eq!(
             github_auth_status_for_exit(false),
             GitHubAuthStatus::Unauthenticated
+        );
+    }
+
+    #[test]
+    fn github_repository_names_and_visibility_args_are_restricted() {
+        let max_length = "a".repeat(100);
+        for valid in ["repo", "my_repo.v2", "a-1", max_length.as_str()] {
+            assert!(is_valid_github_repository_name(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "owner/repo",
+            "https://github.com/a/b",
+            "bad name",
+            "ñ",
+        ] {
+            assert!(!is_valid_github_repository_name(invalid), "{invalid}");
+        }
+
+        let args = |visibility| {
+            github_repo_create_args("repo-name", visibility)
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            args(GitHubRepositoryVisibility::Private),
+            [
+                "repo",
+                "create",
+                "repo-name",
+                "--source",
+                ".",
+                "--remote",
+                "origin",
+                "--push",
+                "--private"
+            ]
+            .map(str::to_owned)
+        );
+        assert_eq!(
+            args(GitHubRepositoryVisibility::Public),
+            [
+                "repo",
+                "create",
+                "repo-name",
+                "--source",
+                ".",
+                "--remote",
+                "origin",
+                "--push",
+                "--public"
+            ]
+            .map(str::to_owned)
+        );
+    }
+
+    #[test]
+    fn invalid_github_repository_slug_is_rejected_before_processes() {
+        let response = run(GitOperation::CreateGitHubRepository {
+            repository: PathBuf::from("unused because slug validation must run first"),
+            name: "owner/repo".into(),
+            visibility: GitHubRepositoryVisibility::Private,
+        });
+        assert!(response.result.unwrap_err().message.contains("slug"));
+        assert!(response.commands.is_empty());
+    }
+
+    #[test]
+    fn github_source_preflight_rejects_unborn_and_existing_origin_repositories() {
+        let temp = TempPath::new();
+        let unborn = temp.0.join("unborn");
+        fs::create_dir_all(&unborn).unwrap();
+        raw_git(&unborn, &["init", "-q"]);
+        let mut log = Vec::new();
+        let error = validate_local_github_source(&unborn, &mut log).unwrap_err();
+        assert!(error.message.contains("no tiene un commit"));
+        assert_eq!(
+            log.len(),
+            2,
+            "remote listing and HEAD check should be recorded"
+        );
+        assert!(
+            log.iter()
+                .all(|entry| entry.cwd.as_deref() == Some(unborn.as_path()))
+        );
+
+        let with_origin = temp.0.join("with-origin");
+        fs::create_dir_all(&with_origin).unwrap();
+        raw_git(&with_origin, &["init", "-q"]);
+        raw_git(&with_origin, &["config", "user.name", "Gitzi Test"]);
+        raw_git(
+            &with_origin,
+            &["config", "user.email", "gitzi@example.invalid"],
+        );
+        commit(&with_origin, "first.txt", "first\n", "initial");
+        raw_git(
+            &with_origin,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/user/repo.git",
+            ],
+        );
+        let mut log = Vec::new();
+        let error = validate_local_github_source(&with_origin, &mut log).unwrap_err();
+        assert!(error.message.contains("Ya existe `origin`"));
+        assert_eq!(
+            log.len(),
+            1,
+            "existing origin must be rejected before HEAD checks"
+        );
+        assert_eq!(log[0].command_display, "git remote");
+    }
+
+    #[test]
+    fn github_source_preflight_requires_a_local_branch_and_commit() {
+        let temp = TempPath::new();
+        let repo = temp.0.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        raw_git(&repo, &["init", "-q", "--initial-branch=main"]);
+        raw_git(&repo, &["config", "user.name", "Gitzi Test"]);
+        raw_git(&repo, &["config", "user.email", "gitzi@example.invalid"]);
+        commit(&repo, "first.txt", "first\n", "initial");
+        let mut log = Vec::new();
+        assert_eq!(
+            validate_local_github_source(&repo, &mut log).unwrap(),
+            "main"
+        );
+        assert_eq!(log.len(), 3);
+        assert!(
+            log.iter()
+                .all(|entry| entry.status == CommandStatus::Succeeded)
         );
     }
 

@@ -58,3 +58,16 @@ Entrega 5 aceptada después de verificación Windows y revisión independiente. 
 | T6-VERIFY | Agente de verificación | Revisión independiente del flujo T6 integrado | Sin cambios de producción | T6-APP/T6-GIT/T6-UI integrados | Revisión independiente sin defectos confirmados; fmt, Clippy, 28 pruebas y build Windows pasan; Linux, consola interactiva y GUI visual se declaran sin afirmar verificación | aceptada |
 
 La actualización T6 queda cerrada en Windows tras la revisión independiente. La autenticación real, la conexión del remoto del proyecto y la ejecución remota de Actions requieren completar el flujo/URL del repositorio por el usuario.
+
+## Actualización solicitada T7 — ventana compacta, login web y creación de repositorios GitHub
+
+Contrato publicado en `CONTRATOS.md` antes de delegar. El orquestador posee dominio, coordinación, entrypoint y documentación; los agentes no comparten archivos de escritura.
+
+| ID | Responsable | Alcance | Archivos | Dependencias | Criterios | Estado |
+| --- | --- | --- | --- | --- | --- | --- |
+| T7-APP | Orquestador | Contratos tipados, validación/coordinación, tamaño fijo de ventana y documentos | `src/domain.rs`, `src/app.rs`, `src/main.rs`, docs raíz | Contrato T7 en `CONTRATOS.md`; runner/UI reciben acciones y respuestas fijadas | Ventana 1024×700 no maximizante/fullscreen; app valida slug, login, HEAD/rama y origin antes de solicitar; éxito informa URL y refresca | aceptada |
+| T7-GIT | Agente de motor | Login gh en navegador y create+push seguro desde commits | `src/git/runner.rs` | Tipos exactos T7 ya en `src/domain.rs`/`CONTRATOS.md` | Argumentos separados; preflight repetido; no origin overwrite; privado/público; no commit automático ni rollback destructivo; tests sin red real | aceptada |
+| T7-UI | Agente de interfaz | Renovación ligera, comandos legibles, login navegador y formulario/confirmación de publicación | `src/ui/**` | `GitHubRepositoryVisibility`, actions y success/error state T7 ya publicados | Funciona en ventana compacta, conserva D1–D6; visibilidad private predeterminada; confirmación explícita y estado disponible según contexto | aceptada |
+| T7-VERIFY | Agente verificador | Revisión independiente integrada | Sin cambios de producción | T7-APP/GIT/UI integrados | Revisión sin defectos confirmados restantes; fmt, Clippy, 33 pruebas y build release Windows pasan; GUI visual/Linux/login real/red se declaran no verificados | aceptada |
+
+La actualización T7 queda cerrada en Windows tras revisión independiente. La creación de recursos remotos solo ocurre al usar y confirmar el flujo dentro de Gitzi; no se creó ningún repositorio durante esta entrega. El login, la publicación real, la revisión visual y Linux quedan pendientes de verificarse en el equipo/cuenta del usuario.

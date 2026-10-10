@@ -1,6 +1,6 @@
 # Gitzi: visión y arquitectura
 
-Estado: especificación inicial para guiar la implementación. Este documento describe decisiones de producto y una arquitectura propuesta; no implica que exista una aplicación implementada ni que se hayan medido sus prestaciones.
+Estado: especificación evolutiva del producto. Las entregas aceptadas y las limitaciones verificadas se registran en `ESTADO_DEL_PROYECTO.md`; este documento describe el alcance acordado, no implica que un comportamiento no verificado esté disponible.
 
 ## 1. Visión
 
@@ -27,7 +27,7 @@ Nombre de trabajo: Gitzi, tomado del directorio del proyecto. Puede cambiarse si
 ### Fuera del alcance inicial
 
 - Cubrir todas las opciones posibles de Git.
-- Integración con pull requests, issues o APIs de proveedores como GitHub y GitLab.
+- Integración con pull requests/issues y clientes API propios para proveedores como GitHub y GitLab. La creación opcional de repositorios GitHub mediante la CLI oficial se especifica en la actualización T7.
 - Terminal de propósito general, editor de código completo y sistema de plugins.
 - Tutoriales, asistentes educativos o explicaciones del significado de cada comando.
 - macOS, servicios en la nube propios, cuentas de Gitzi y sincronización de preferencias.
@@ -78,7 +78,7 @@ Las acciones frecuentes deben estar a mano. Las avanzadas se agrupan en menús c
 - Listas e historial con carga progresiva; diferencias grandes con límites explícitos.
 - Sin animaciones decorativas continuas ni repintado constante en reposo.
 
-La ventana se inicia en 1320×860, con mínimo 960×640 y redimensionamiento habilitado; el contenido se adapta a ventanas más compactas.
+La ventana se inicia fija en 1024×700, sin maximización, fullscreen ni redimensionamiento. El contenido se adapta con scroll y jerarquía compacta; la densidad no debe perjudicar legibilidad.
 
 No mostrar paneles vacíos como si una función estuviera implementada. Durante el prototipo pueden usarse datos de ejemplo claramente identificados y aislados de los repositorios reales.
 
@@ -130,6 +130,16 @@ Aceptación: un conflicto no bloquea la aplicación ni provoca reintentos destru
 - Probar y empaquetar en Windows y Linux, o declarar con precisión qué plataforma queda pendiente.
 - Documentar instalación, dependencia de Git y limitaciones reales.
 - Optimizar a partir de mediciones y revisar el tamaño de distribución.
+
+### Actualización T7: acceso web y publicación inicial en GitHub
+
+- Presentar inicio de sesión mediante el flujo web oficial de GitHub CLI y una acción explícita para verificar la sesión al volver.
+- Permitir crear un repositorio privado o público a partir de los commits de la rama local del repositorio abierto. Privado será la opción inicial.
+- Mostrar una confirmación que identifique el nombre y visibilidad y advierta que se agregará `origin`, se publicarán los commits de esa rama y los cambios sin commit permanecerán locales.
+- Validar login de GitHub CLI, commits, rama local, slug y ausencia de `origin`; no sobrescribir remotos ni crear commits automáticamente.
+- Mantener la interfaz moderna y ligera en una ventana compacta, con registro de comandos claramente escaneable y fácil de copiar.
+
+La operación remota usa `gh repo create`; no introduce cliente API, aplicación OAuth ni acceso a PRs/issues. La creación de un repositorio público se confirma de forma diferenciada. Un fallo durante push puede dejar creado el repo remoto y se comunica sin intentar borrar recursos.
 
 ### Ampliaciones posteriores
 
@@ -216,7 +226,7 @@ Respetar las credenciales, agentes SSH, hooks, firma de commits y configuración
 
 Los procesos que necesitan interacción no pueden quedar esperando en una consola oculta indefinidamente. La implementación debe definir un mecanismo compatible o fallar con un mensaje accionable. No se prometerá soporte para todos los mecanismos de autenticación antes de probarlos.
 
-GitHub puede usar el credential helper o agente SSH que ya tenga configurado Git. Como atajo opcional de autenticación, Gitzi puede iniciar `gh auth login` en una consola visible y comprobar después el estado con `gh auth status`; la persona completa el flujo interactivo. GitHub CLI no es requisito para el resto de Gitzi. Gitzi no lee ni persiste tokens y no configura globalmente Git sin consentimiento. La integración con APIs de GitHub, pull requests e issues continúa fuera del alcance inicial.
+GitHub puede usar el credential helper o agente SSH que ya tenga configurado Git. Como flujo opcional, Gitzi puede iniciar `gh auth login --web` en una consola visible; GitHub CLI abre el navegador y la persona completa allí la autorización y cualquier prompt restante. Después Gitzi ofrece comprobar el estado con `gh auth status`. GitHub CLI es opcional para las demás funciones Git; se requiere para iniciar sesión desde la UI y crear un repo GitHub desde los commits actuales. Gitzi no lee ni persiste tokens y no configura globalmente Git sin consentimiento. No implementa un cliente API propio, pull requests ni issues.
 
 ## 8. Registro de comandos
 
